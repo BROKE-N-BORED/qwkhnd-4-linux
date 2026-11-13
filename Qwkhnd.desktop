@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Qwkhnd
+Comment=Build a shorthand dictionary from your own files - full meaning in fewer tokens
+# NOTE: the app dir is baked in by install.sh (same __APP_DIR__ sed
+# as the Icon line). Do NOT use the %k trick here: %k expands to the
+# desktop file's own path, and the installed copy lives in
+# ~/.local/share/applications — run.sh is not there, so the menu
+# icon would silently do nothing (caught by the install sim).
+Exec=python3 -c "import subprocess; subprocess.call(['bash', '__APP_DIR__/run.sh'])"
+Icon=__APP_DIR__/icons/qwkhnd-48.png
+Terminal=false
+Categories=Utility;
+StartupWMClass=Qwkhnd

@@ -1,0 +1,31 @@
+# Secrets — never commit these (immutable rule: sensitive info and
+# APIs are never in code; they live in gitignored files).
+.env
+*.env
+*.key
+*.pem
+*.p12
+*.pfx
+providers.json
+credentials*
+*credentials*
+*secret*
+*private*
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# Build output
+*.zip
+
+# Logs and debug reports (generated on the user's machine)
+logs/
+*.log
+debug-report-*.txt
+
+# App data (generated on the user's machine, not part of the repo)
+qwkhnd-dictionary.json
