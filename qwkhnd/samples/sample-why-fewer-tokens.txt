@@ -1,0 +1,11 @@
+Why fewer tokens matter
+
+A token is a chunk of text that a computer reads as one unit. Long text costs more tokens, and more tokens cost more time and more money. When the same meaning fits in fewer tokens, everything that reads it runs faster and cheaper.
+
+Shorthand is one way to fit more meaning into less text. The words you use the most shrink the most, so the savings add up quickly across a whole document. A book written in shorthand is much shorter than the same book in full words, and nothing is lost, because every code decodes back to the word it stands for.
+
+Qwkhnd builds the dictionary from your own writing, so the codes fit the way you actually write. A dictionary built from novels will favor different words than a dictionary built from code or from letters. Your files decide which words matter most.
+
+The program is small on purpose. It reads your files, counts your words, and hands out codes. It does not need the network, and it does not need a powerful computer. It runs on the machine you already have.
+
+This file is a sample. You can delete it. The dictionary it helped build will be rebuilt from your own files whenever you press Rebuild.

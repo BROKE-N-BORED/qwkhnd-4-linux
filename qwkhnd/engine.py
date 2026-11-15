@@ -15,7 +15,7 @@ How it works
 The round-trip is exact: decode(encode(text)) == text for any text.
 That is the property the tests hammer on.
 
-Deliberate v0.1 limits, all documented in the README:
+Deliberate limits, all documented in the README:
 - Words are case-sensitive ("The" and "the" are different entries).
   Case-folding is future work; exactness comes first.
 - Words shorter than 3 letters never get codes: "~" + a 1-letter

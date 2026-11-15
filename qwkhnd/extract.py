@@ -1,6 +1,6 @@
 """Text extraction from the Source Material folder.
 
-What v0.1 reads
+What it reads
 ---------------
 - .txt, .md and other text files: read as UTF-8 (bad bytes are
   tolerated, not fatal).
@@ -19,7 +19,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 
 # Images, audio and video need OCR or speech recognition to turn
-# into text. That is future work — v0.1 says so instead of faking it.
+# into text. That is future work. This version says so instead of faking it.
 MEDIA_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif",
     ".tiff", ".ico", ".heic", ".mp3", ".wav", ".flac", ".ogg",
@@ -27,9 +27,9 @@ MEDIA_EXTENSIONS = {
     ".wmv", ".flv",
 }
 MEDIA_REASON = ("images, audio and video need OCR or speech "
-                "recognition, which is not in v0.1")
+                "recognition, which is not in this version")
 
-# Archives, programs, databases, fonts: no readable text in v0.1.
+# Archives, programs, databases, fonts: no readable text.
 BINARY_EXTENSIONS = {
     ".zip", ".tar", ".gz", ".bz2", ".xz", ".7z", ".rar",
     ".exe", ".dll", ".so", ".bin", ".dmg", ".iso", ".img",
@@ -37,10 +37,10 @@ BINARY_EXTENSIONS = {
     ".ttf", ".otf", ".woff", ".woff2",
     ".class", ".o", ".a", ".pyc",
 }
-BINARY_REASON = "not a readable text format in v0.1"
+BINARY_REASON = "not a readable text format"
 
 OLD_OFFICE_EXTENSIONS = {".doc", ".xls", ".ppt"}
-OLD_OFFICE_REASON = ("old Office format: not readable in v0.1, "
+OLD_OFFICE_REASON = ("old Office format: not readable, "
                      "save it as .docx to use it")
 
 _WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -154,7 +154,7 @@ def extract_pdf(path):
     text = "\n".join(pages)
     if not text.strip():
         return False, ("no extractable text in this PDF. It may be "
-                       "scanned images, and OCR is not in v0.1")
+                       "scanned images, and OCR is not in this version")
     return True, text
 
 

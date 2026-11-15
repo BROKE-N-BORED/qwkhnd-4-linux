@@ -239,7 +239,7 @@ class ExportTests(unittest.TestCase):
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
         self.assertEqual(data["app"], "Qwkhnd")
-        self.assertEqual(data["version"], "0.1")
+        self.assertEqual(data["version"], "0.2")
         self.assertEqual(data["marker"], "~")
         self.assertTrue(data["entries"])
         top = data["entries"][0]

@@ -56,14 +56,14 @@ class SingleSourceTests(unittest.TestCase):
                 text, r"""["']Qwkhnd["']""",
                 "%s hardcodes the app name" % name)
             self.assertNotRegex(
-                text, r"""["']0\.1["']""",
+                text, r"""["']0\.2["']""",
                 "%s hardcodes the version" % name)
 
     def test_init_is_the_single_source(self):
         from qwkhnd import APP_ID, APP_NAME, VERSION
         self.assertEqual(APP_NAME, "Qwkhnd")
         self.assertEqual(APP_ID, "qwkhnd")
-        self.assertEqual(VERSION, "0.1")
+        self.assertEqual(VERSION, "0.2")
 
     def test_help_text_uses_the_single_source(self):
         from qwkhnd import APP_NAME, VERSION

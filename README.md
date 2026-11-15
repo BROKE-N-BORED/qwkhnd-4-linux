@@ -32,9 +32,19 @@ Terminal path, if you ever want it: `bash install.sh`, then
    the background, so the window stays usable: progress shows
    under the button, and **Cancel** stops it (the old dictionary
    stays in place until a rebuild finishes).
-3. The most frequent words get the shortest codes. Try it on the
-   **Try it** tab, and export the dictionary as JSON or plain text.
-   The **Help** menu opens a How to Use window.
+3. The most frequent words get the shortest codes. Try it in the
+   **Try it** window (the Try it button, or View menu), and export
+   the dictionary as JSON or plain text. The **Help** menu opens a
+   How to Use window, and the **Help** tab is a quick start.
+
+On the first run, Qwkhnd drops three sample files into the Source
+Material folder and shows a short Getting started checklist, so
+Rebuild has something to read right away. The results appear as a
+bento grid (characters saved, files read, words found, codes
+assigned, before/after sample); the dictionary table has a live
+search box and a Show all switch. The **View** menu holds two
+presets — **Big text** and **Reduced motion** — and the shortcuts
+are **Ctrl+R** rebuild, **Ctrl+E** Try it / encode, **/** search.
 
 ## What it reads
 
@@ -46,7 +56,7 @@ Terminal path, if you ever want it: `bash install.sh`, then
 ## What it skips (every skipped file is listed, with its reason)
 
 - Images, audio and video — turning those into text needs OCR or
-  speech recognition, which is not in v0.1
+  speech recognition, which is not in this version
 - Archives, programs and other binary files
 - Old `.doc` / `.xls` / `.ppt` files — save them as `.docx` to use them
 - Hidden files and folders, and scanned PDFs with no text layer
@@ -61,7 +71,7 @@ Terminal path, if you ever want it: `bash install.sh`, then
   A literal `~` in your text is written as `~~`.
 - Decode is exact: decoding encoded text gives back the original,
   character for character. The test suite hammers on this.
-- Words are case-sensitive in v0.1 ("The" and "the" are different
+- Words are case-sensitive ("The" and "the" are different
   entries), and words shorter than 3 letters never get codes (they
   cannot shrink: `~` + a 1-letter code is already 2 characters).
 
@@ -76,8 +86,10 @@ a scrubbed report you can send when something goes wrong.
 ## For developers
 
 - Run the tests: `python -m unittest discover -s tests`
-  (101 tests in v0.1: engine, extraction, debug log, GUI,
-  installer, worker-thread rebuild, cancel, single instance).
+  (150 tests in v0.2: engine, extraction, debug log, GUI,
+  installer, worker-thread rebuild, cancel, single instance,
+  plus the v0.2 UI: checklist, samples, disclosure, search,
+  bento, notices, state, presets, shortcuts, copy).
 - Build the release zip: `python3 build_zip.py`
 - The debug log layer is the BNB T21 `debug_log.py` module
   (standard library only), dropped in unchanged.
