@@ -1,5 +1,110 @@
 # Changelog
 
+## v0.3 — 2026-11-15
+
+All 29 tasks from the v0.2 review, in priority order: hardening,
+speed, and the missing pieces.
+
+- Safe loading and saving (T01): the saved dictionary is fully
+  validated before it is trusted (every malformed shape starts
+  the app empty with a notice, never a crash), and every write is
+  atomic, so a failed save leaves the old file untouched.
+- Streaming counting (T02): words are counted as they are read,
+  never held as one giant token list, so a big rebuild stays
+  light on RAM (the 14 MB probe corpus adds 0 MB above baseline,
+  where v0.2 added about 390 MB), and the counting itself runs
+  through Counter.update, which counts in C.
+- Virtual table (T03): the dictionary table is a model/view now,
+  so Show all on a 200,000-entry dictionary takes seconds instead
+  of a minute and hundreds of megabytes (v0.2: 63 s and 723 MB).
+- Fast search (T04): the sort runs once per dictionary and the
+  search waits 200 ms after the last keystroke, so typing never
+  waits on a sort.
+- No dead codes (T05) and saving-ranked codes (T06): a word only
+  gets a code when the code can actually shrink it, and the
+  shortest codes go to the words that save the most text. The
+  dictionary has zero dead codes now (v0.2 had 19 on the sample
+  corpus and 81 on a 500,000-word synthetic corpus). Total
+  saving is essentially unchanged: on the sample corpus v0.3
+  saves 1208 of 3504 characters (34.5%, v0.2: 1231, 35.1%) with
+  185 codes instead of 209; on the synthetic corpus it saves
+  54.4% (v0.2: 54.5%) with 915 codes instead of 1000.
+- Pinned requirements (T07): PySide6-Essentials 6.12.0 and pypdf
+  7.1.0, the versions the install sim verified.
+- Cancellable reads (T08): text files are read in chunks and
+  PDFs page by page, so Cancel stops a big file part-way through
+  and progress is shown inside the file; file symlinks are never
+  followed. There is no per-file size cap, by Joshua's decision:
+  streaming keeps RAM flat, so the guard is Cancel plus the
+  symlink skip, not a limit.
+- Big text fits (T09): the results area scrolls, so the window
+  minimum stays under a 768 px screen under Big text, and the
+  sample tile never clips.
+- The skipped list and the sample survive a restart (T10): both
+  are stored in the saved dictionary and restored on load.
+- Restore (T11): every rebuild keeps the previous dictionary,
+  and File > Restore previous dictionary brings it back.
+- EPUB support (T12): ebooks are read in chapter order, markup
+  stripped.
+- Markup stripped (T13): HTML files are read with the markup
+  stripped (script and style dropped); Markdown links keep their
+  text and drop their URLs, and code is dropped.
+- Tooltips and shortcuts (T14): every control explains itself on
+  hover, the Help menu lists all the keyboard shortcuts, the
+  search box has a one-line explainer, and the / key can be
+  turned off in the View menu.
+- File menu and a real How to Use index (T15): File holds Open
+  folder, the exports, the Debug report, Restore, and Quit; How
+  to Use is a section list on the left with the section text on
+  the right.
+- Drag and drop (T16): drop files onto the window to copy them
+  into the Source Material folder (a name clash gets a number),
+  or drop a folder to make it the source folder.
+- Try it grows up (T17): Copy result, a sample sentence that
+  encodes shorter, and Clear.
+- Validation where it helps (T18): the folder field warns on the
+  spot when the folder does not exist, and an empty search says
+  what to try next.
+- Launcher and installer (T19): the menu icon calls run.sh
+  directly; a failed start saves its error to
+  ~/Qwkhnd/logs/startup-error.txt; the installer names the
+  actual missing library (and its package) instead of guessing,
+  and a pip failure gets a plain-words message.
+- Icon fallback (T20): a corrupt SVG falls back to the painter
+  drawing; a missing SVG is a plain error, not a traceback.
+- More from Word, more encodings (T21): .docx headers, footers,
+  footnotes and endnotes count; UTF-16 without a byte-order mark
+  is detected; the scan never reads Qwkhnd's own dictionary or
+  logs.
+- The decoding rule, documented (T22): decoding matches the
+  whole run of letters after ~, so the guide says to put a space
+  after a code when writing shorthand by hand. The behaviour is
+  unchanged, and tests pin it.
+- Reproducible zip (T23): a fixed timestamp, so the same tree
+  always builds the same zip; a test proves every file in the
+  tree is in the manifest.
+- Uninstaller (T24): uninstall.sh plus an Uninstall-Qwkhnd
+  desktop file. It removes the install and asks before touching
+  ~/Qwkhnd, never deleting it unasked.
+- Docs and Python floor (T25): a Troubleshooting section, the
+  Python 3.10 floor stated and checked, and no hardcoded test
+  count in the README (it went stale in v0.2).
+- Tests for the untested paths (T26): scanned and multi-page and
+  encrypted PDFs, the crash handler's report, Open folder, the
+  About dialog, closing mid-rebuild, codes past 3 letters, and
+  the icon fallback.
+- Performance guards (T27): the suite now pins counting RAM
+  (tracemalloc), Show All and search on a 200,000-entry
+  dictionary, and the fixed waits in the GUI tests are deadline
+  loops.
+- Polish (T28): a warning glyph on notices, the disabled Rebuild
+  text at 5.02:1 contrast, "Dictionary saved." in the status bar
+  after a rebuild, a safe debug report button, and the
+  single-instance lock released on close.
+- Table density (T29): Compact/Comfortable rows in the View menu,
+  remembered between runs, sized from the font so Compact never
+  clips under Big text.
+
 ## v0.2 — 2026-11-13
 
 Full UI redesign, from the audit against the BNB UI Design Source

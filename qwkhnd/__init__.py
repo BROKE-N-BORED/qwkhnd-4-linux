@@ -11,6 +11,6 @@ in one pass — no other Python file hardcodes the name or version.
 
 APP_NAME = "Qwkhnd"
 APP_ID = "qwkhnd"
-VERSION = "0.2"
+VERSION = "0.3"
 
 __all__ = ["APP_NAME", "APP_ID", "VERSION"]

@@ -5,6 +5,7 @@ that prove the scrubber redacts them. They are not real credentials.
 """
 
 import os
+import sys
 import tempfile
 import unittest
 
@@ -92,6 +93,32 @@ class DebugLoggerTests(unittest.TestCase):
         self.assertIn("PySide6", text)
         self.assertIn("Python:", text)
         self.assertIn("RAM:", text)
+
+    def test_crash_handler_writes_a_report(self):
+        # T26: calling the installed excepthook writes a report
+        # file and still calls the previous hook.
+        self.log.install_crash_handler()
+        chained = []
+        # Silence the real previous hook (it prints to stderr).
+        self.log._previous_excepthook = lambda *args: chained.append(
+            True)
+        try:
+            try:
+                raise ValueError("boom for the crash test")
+            except ValueError:
+                exc_type, exc_value, exc_tb = sys.exc_info()
+            sys.excepthook(exc_type, exc_value, exc_tb)
+        finally:
+            self.log.uninstall_crash_handler()
+        self.assertEqual(chained, [True])
+        reports = [name for name in os.listdir(self.log_dir)
+                   if name.startswith("debug-report-")]
+        self.assertEqual(len(reports), 1)
+        with open(os.path.join(self.log_dir, reports[0]),
+                  encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("UNHANDLED EXCEPTION", text)
+        self.assertIn("boom for the crash test", text)
 
     def test_two_reports_same_path_do_not_overwrite(self):
         # An explicit path makes the collision deterministic (two

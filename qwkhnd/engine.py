@@ -3,9 +3,12 @@
 How it works
 ------------
 1. Count how often each word appears across the Source Material.
-2. Hand out the shortest codes to the most frequent words (the most
-   common word gets the 1-letter code "a", the next "b", and so on,
-   then the 2-letter codes, then 3-letter, ...).
+2. Hand out the shortest codes to the words that save the most
+   text (count times characters saved), so the total saving is
+   the most the dictionary can give: the top word gets the
+   1-letter code "a", the next "b", and so on, then the 2-letter
+   codes, then 3-letter, .... A word gets no code when the code
+   it would get cannot make it shorter.
 3. Encode: a word is replaced by "~" + its code — but only when the
    coded form is actually shorter than the word, so encoding never
    makes text longer. A literal "~" in the original text is written
@@ -25,6 +28,9 @@ Deliberate limits, all documented in the README:
 """
 
 import json
+import os
+import re
+import tempfile
 from collections import Counter
 from itertools import product
 
@@ -38,6 +44,27 @@ MIN_WORD_LEN = 3
 SAMPLE_CHARS = 1500
 
 
+def atomic_write_text(path, text):
+    """Write a text file atomically (T01): temp file in the same
+    folder, then os.replace, so a crash mid-write leaves the
+    previous good file in place. Removes the temp file on failure.
+    """
+    folder = os.path.dirname(os.path.abspath(path))
+    fd, tmp_path = tempfile.mkstemp(prefix=".qwkhnd-", dir=folder)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 # ---------------------------------------------------------------- tokens
 
 
@@ -45,15 +72,20 @@ def _is_word_char(ch):
     return ch.isalpha() or ch.isdigit()
 
 
-def split_tokens(text):
-    """Split text into (is_word, token) pairs, preserving everything.
+# Tokenizer (T02): a regex pass instead of a char-by-char Python
+# loop. The word rule is unchanged: a run of letters/digits, with
+# an apostrophe kept inside when it sits between two word
+# characters. [^\W_] is the regex word class minus the underscore
+# (an underscore is a separator here, not a word character), and
+# [\W_] is everything else, underscore included.
+_TOKEN_RE = re.compile(r"([^\W_]+(?:'[^\W_]+)*)|([\W_]+)")
 
-    A word is a run of letters/digits, with an apostrophe kept inside
-    when it sits between two word characters ("don't" is one word,
-    but the quotes around 'tis' are separators). Joining every token
-    back together reproduces the input exactly.
-    """
-    tokens = []
+
+def _iter_tokens_charloop(text):
+    """Yield (is_word, token) pairs the slow exact way: the v0.2
+    char-by-char loop, as a generator (no list built). Used only
+    for the non-ASCII words the regex cannot prove exact (see
+    iter_tokens)."""
     i, n = 0, len(text)
     while i < n:
         if _is_word_char(text[i]):
@@ -67,24 +99,60 @@ def split_tokens(text):
                     j += 1
                 else:
                     break
-            tokens.append((True, text[i:j]))
+            yield True, text[i:j]
             i = j
         else:
             j = i + 1
             while j < n and not _is_word_char(text[j]):
                 j += 1
-            tokens.append((False, text[i:j]))
+            yield False, text[i:j]
             i = j
-    return tokens
+
+
+def iter_tokens(text):
+    """Yield (is_word, token) pairs, streaming (T02).
+
+    A regex pass finds the tokens; nothing is materialized, so
+    counting a large corpus stays flat in RAM instead of building
+    a list of every token (v0.2 peaked near 30x the text size).
+    The token rules are exactly the v0.2 ones. One known regex
+    edge: the regex word class also matches numeric symbols
+    (vulgar fractions like 1/2) that the char rule calls
+    separators, so a matched word with any non-ASCII character
+    is re-split by the exact char loop instead. ASCII text (the
+    common case) never takes the slow path.
+    """
+    for match in _TOKEN_RE.finditer(text):
+        word = match.group(1)
+        if word is None:
+            yield False, match.group(2)
+        elif word.isascii():
+            yield True, word
+        else:
+            yield from _iter_tokens_charloop(word)
+
+
+def split_tokens(text):
+    """Split text into (is_word, token) pairs, preserving everything.
+
+    A word is a run of letters/digits, with an apostrophe kept inside
+    when it sits between two word characters ("don't" is one word,
+    but the quotes around 'tis' are separators). Joining every token
+    back together reproduces the input exactly.
+    """
+    return list(iter_tokens(text))
 
 
 def count_words(text, counter=None):
     """Add the word frequencies of one text to a Counter (new if None)."""
     if counter is None:
         counter = Counter()
-    for is_word, token in split_tokens(text):
-        if is_word:
-            counter[token] += 1
+    # Counter.update counts in C (_count_elements); a manual
+    # `counter[token] += 1` loop is measurably slower (T02: this
+    # is what gets the streaming tokenizer under half the old
+    # counting time on the probe corpus).
+    counter.update(token for is_word, token in iter_tokens(text)
+                   if is_word)
     return counter
 
 
@@ -105,15 +173,42 @@ def generate_codes(count):
 
 
 def build_word_codes(counter):
-    """Map words to codes: most frequent first, ties broken by word.
+    """Map words to codes: ranked by characters saved (T06), ties
+    broken by word. Only words whose code can actually shrink them
+    get one (T05).
 
-    Only words of MIN_WORD_LEN or more get codes (shorter words can
-    never shrink). The result is deterministic for a given counter.
+    Two passes. Pass 1 ranks by frequency (the v0.2 rule) to give
+    every word a code-length estimate. Pass 2 re-ranks by expected
+    saving: count times the characters the code would save (word
+    length minus code length minus the marker). The shortest codes
+    then go to the words that save the most text, which is the
+    goal: fewer tokens. A word is skipped when the code it would
+    get cannot make it shorter, so the dictionary holds no dead
+    codes; the skipped code stays available for the next word.
+    The result is deterministic for a given counter.
     """
     words = [w for w in counter if len(w) >= MIN_WORD_LEN]
+    if not words:
+        return {}
     words.sort(key=lambda w: (-counter[w], w))
+    first_pass = {}
+    for word, code in zip(words, generate_codes(len(words))):
+        first_pass[word] = code
+    words.sort(key=lambda w: (
+        -counter[w] * max(0, len(w) - len(first_pass[w]) - 1), w))
+    result = {}
     codes = generate_codes(len(words))
-    return {word: next(codes) for word in words}
+    pending = None
+    for word in words:
+        if pending is None:
+            try:
+                pending = next(codes)
+            except StopIteration:
+                break
+        if len(pending) + 1 < len(word):
+            result[word] = pending
+            pending = None
+    return result
 
 
 # ---------------------------------------------------------------- dictionary
@@ -138,7 +233,7 @@ class QwkhndDictionary:
         """Full text -> shorthand. Never makes text longer (except a
         literal "~" in the input, which becomes "~~")."""
         out = []
-        for is_word, token in split_tokens(text):
+        for is_word, token in iter_tokens(text):
             if is_word:
                 code = self.word_to_code.get(token)
                 if code is not None and len(code) + 1 < len(token):
@@ -202,18 +297,68 @@ class QwkhndDictionary:
 
     @classmethod
     def from_json_dict(cls, data):
+        """Rebuild a dictionary from a saved JSON dict.
+
+        Validates everything (T01): the shape, the marker, the
+        version, and code uniqueness. Raises ValueError with a
+        plain message on anything malformed, so the window can
+        start empty with a notice instead of crashing. The old
+        version strings are history, not the current version:
+        the current one comes from VERSION, the single source.
+        """
+        if not isinstance(data, dict):
+            raise ValueError("saved dictionary is not an object")
+        if data.get("marker", MARKER) != MARKER:
+            raise ValueError(
+                "saved dictionary uses a different marker")
+        version = data.get("version")
+        if version is not None \
+                and version not in ("0.1", "0.2", VERSION):
+            raise ValueError(
+                "saved dictionary is version %s, which this "
+                "version cannot read" % version)
+        entries = data.get("entries", [])
+        if not isinstance(entries, list):
+            raise ValueError(
+                "saved dictionary entries are not a list")
         word_to_code = {}
         counts = {}
-        for entry in data.get("entries", []):
-            word_to_code[entry["word"]] = entry["code"]
-            counts[entry["word"]] = entry.get("count", 0)
+        seen_codes = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    "dictionary entry is not an object")
+            word = entry.get("word")
+            code = entry.get("code")
+            if not isinstance(word, str) or not word:
+                raise ValueError(
+                    "dictionary entry has no word")
+            if not isinstance(code, str) or not code:
+                raise ValueError(
+                    "dictionary entry has no code")
+            if any(ch not in CODE_CHARS for ch in code):
+                raise ValueError(
+                    "dictionary code has bad characters")
+            if word in word_to_code:
+                raise ValueError(
+                    "dictionary lists a word twice")
+            if code in seen_codes:
+                raise ValueError(
+                    "dictionary gives one code to two words")
+            count = entry.get("count", 0)
+            if not isinstance(count, int) \
+                    or isinstance(count, bool) or count < 0:
+                raise ValueError(
+                    "dictionary entry has a bad count")
+            word_to_code[word] = code
+            counts[word] = count
+            seen_codes[code] = word
         return cls(word_to_code, counts)
 
     def export_json(self, path):
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(self.to_json_dict(), fh, ensure_ascii=False,
-                      indent=2)
-            fh.write("\n")
+        text = json.dumps(self.to_json_dict(), ensure_ascii=False,
+                          indent=2) + "\n"
+        atomic_write_text(path, text)
 
     def export_text(self, path):
         lines = [
@@ -226,8 +371,7 @@ class QwkhndDictionary:
         for word, code in self._sorted_entries():
             lines.append("%s -> ~%s  (used %d times)"
                          % (word, code, self.counts.get(word, 0)))
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write("\n".join(lines) + "\n")
+        atomic_write_text(path, "\n".join(lines) + "\n")
 
 
 # ---------------------------------------------------------------- build
@@ -252,16 +396,18 @@ class BuildReport:
 
 
 def build_from_folder(folder, log=None, progress=None,
-                      cancelled=None):
+                      cancelled=None, file_progress=None):
     """Scan a folder and build a dictionary from everything readable.
 
     Files are processed one at a time (light on RAM: only one file's
     text is held at once). progress(done, total, name) is called per
-    file when given. cancelled() is checked before each file when
-    given: when it returns True the build stops at the next file
-    boundary, the report is marked cancelled, and the dictionary
-    built from the files read so far is returned. Returns
-    (QwkhndDictionary, BuildReport).
+    file when given. cancelled() is checked before each file and
+    inside big files (per chunk for text, per page for PDFs): when
+    it returns True the build stops, the report is marked
+    cancelled, and the dictionary built from the files read so far
+    is returned. file_progress(name, fraction) reports the read
+    inside one big file when given. Returns (QwkhndDictionary,
+    BuildReport).
     """
     if log is not None:
         log.info("rebuild started: %s", folder)
@@ -281,7 +427,18 @@ def build_from_folder(folder, log=None, progress=None,
         name = _extract.display_name(folder, path)
         if progress is not None:
             progress(done, total, name)
-        ok, payload = _extract.extract_file(path)
+        try:
+            ok, payload = _extract.extract_file(
+                path, cancelled=cancelled,
+                file_progress=(
+                    (lambda frac, _name=name:
+                     file_progress(_name, frac))
+                    if file_progress is not None else None))
+        except _extract.Cancelled:
+            report.cancelled = True
+            if log is not None:
+                log.info("rebuild cancelled inside %s", name)
+            break
         if not ok:
             report.files_skipped.append((name, payload))
             if log is not None:

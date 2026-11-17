@@ -28,9 +28,11 @@ PREFIX = APP_ID + "/"
 
 EXEC_FILES = {
     "install.sh",
+    "uninstall.sh",
     "run.sh",
     "Qwkhnd.desktop",
     "Install-Qwkhnd.desktop",
+    "Uninstall-Qwkhnd.desktop",
 }
 
 PLAIN_FILES = [
@@ -60,6 +62,7 @@ PLAIN_FILES = [
     "tests/test_debug_log.py",
     "tests/test_gui.py",
     "tests/test_install.py",
+    "tests/test_perf.py",
 ]
 
 
@@ -99,6 +102,9 @@ def build():
                 print("MISSING: %s" % name)
                 return 1
             info = zipfile.ZipInfo(PREFIX + name)
+            # T23: a fixed timestamp, so the same tree always
+            # builds the same zip (same SHA-256).
+            info.date_time = (1980, 1, 1, 0, 0, 0)
             info.create_system = 3  # Unix, so the mode bits are kept
             info.external_attr = mode << 16
             with open(full, "rb") as fh:

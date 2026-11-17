@@ -63,22 +63,42 @@ def render_with_painter(app):
 
 def main():
     from PySide6.QtGui import QGuiApplication, QImage
+    svg_path = os.path.join(ROOT, "icons", "qwkhnd.svg")
+    if not os.path.exists(svg_path):
+        # T20: no source asset at all means the tree is broken;
+        # say so plainly instead of silently drawing fallbacks.
+        print("cannot render icons: %s is missing" % svg_path)
+        return 1
     app = QGuiApplication(sys.argv)
     try:
-        used = "svg" if render_with_svg(app) else "painter"
+        if render_with_svg(app):
+            used = "svg"
+        else:
+            # T20: a corrupt SVG falls back to the painter, which
+            # draws the same shapes. (The old code set used to
+            # "painter" here without ever calling it.)
+            render_with_painter(app)
+            used = "painter"
     except ImportError:
         render_with_painter(app)
         used = "painter"
     ok = True
     for size in (48, 256):
         path = os.path.join(ROOT, "icons", "qwkhnd-%d.png" % size)
+        if not os.path.exists(path):
+            # T20: report a missing file instead of crashing on
+            # os.path.getsize.
+            print("%s: missing" % path)
+            ok = False
+            continue
         image = QImage(path)
+        size_bytes = os.path.getsize(path)
         good = (not image.isNull() and image.width() == size
                 and image.height() == size
-                and os.path.getsize(path) > 100)
+                and size_bytes > 100)
         print("%s: %dx%d, %d bytes, ok=%s"
               % (path, image.width(), image.height(),
-                 os.path.getsize(path), good))
+                 size_bytes, good))
         ok = ok and good
     print("renderer: %s" % used)
     return 0 if ok else 1
