@@ -1,10 +1,10 @@
 How shorthand works
 
-A shorthand code is a short stand-in for a longer word. Qwkhnd hands out codes by frequency. It counts every word in your Source Material folder, then gives the shortest codes to the words that appear the most. Common words like the and and get one-letter codes. Rarer words get two-letter codes, then three-letter codes, and so on.
+A shorthand code is a short stand-in for a longer word. Qwkhnd hands out codes by what they save. It counts every word in your Source Material folder, then gives the shortest codes to the words that save the most text: how often a word appears, times how many characters its code saves. Long words you use often get one-letter codes. Rarer words get two-letter codes, then three-letter codes, and so on.
 
-To use a code, you write a tilde before it. The word dictionary might become ~d, and the word shorthand might become ~e. The exact codes depend on your own files, because your words are not the same as anyone else's words.
+To use a code, you write a tilde before it. The word dictionary might become ~a, and the word shorthand might become ~b. The exact codes depend on your own files, because your words are not the same as anyone else's words.
 
-Encoding never makes text longer. A word is only replaced when the coded form is actually shorter than the word itself. Words of one or two letters never get codes at all, because a tilde plus a code would be longer than the word.
+Encoding never makes text longer, except for a literal ~, which is written as ~~. A word is only replaced when the coded form is actually shorter than the word itself. Words of one or two letters never get codes at all, because a tilde plus a code would be longer than the word.
 
 Decoding is exact. Every code maps back to one word, and a literal tilde in your text is written as two tildes, so the decoder always knows the difference. If you encode a sentence and then decode it, you get the same sentence back, character for character.
 

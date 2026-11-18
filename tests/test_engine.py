@@ -355,6 +355,13 @@ class ExportTests(unittest.TestCase):
         self.assertIn("the -> ~%s"
                       % self.dictionary.word_to_code["the"], text)
         self.assertIn("quick -> ~", text)
+        # T21 (v0.4): the header says the codes were ranked by
+        # what they save, not by frequency.
+        self.assertIn(
+            "Codes are ranked by the text they save, so the "
+            "shortest code is not always on the most frequent "
+            "word.",
+            text)
 
 
 class DictionaryLoadTests(unittest.TestCase):
@@ -542,6 +549,21 @@ class BuildFromFolderTests(unittest.TestCase):
         self.assertEqual(report.total_words, 0)
         self.assertEqual(report.sample_text, "")
 
+    def test_uncovered_words_listed_most_used_first(self):
+        # T18 (v0.4): words too short to shrink get no code, and
+        # the report lists them most-used first, ties broken
+        # alphabetically.
+        self._write("a.txt",
+                    "a a a an an the dictionary of to")
+        dictionary, report = build_from_folder(self.folder)
+        self.assertEqual(report.uncovered_words,
+                         [("a", 3), ("an", 2), ("of", 1),
+                          ("to", 1)])
+        for word, _ in report.uncovered_words:
+            self.assertNotIn(word, dictionary.word_to_code)
+        self.assertIn("the", dictionary.word_to_code)
+        self.assertIn("dictionary", dictionary.word_to_code)
+
     def test_skipped_files_listed(self):
         self._write("good.txt", "the quick brown fox")
         self._write("photo.png", b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
@@ -629,6 +651,46 @@ class BuildFromFolderTests(unittest.TestCase):
         self.assertTrue(report.cancelled)
         self.assertEqual(report.files_read, 0)
         self.assertEqual(len(dictionary), 0)
+
+
+class EmptyFileTests(unittest.TestCase):
+    """T09 (v0.4): empty files are listed as skipped, not counted
+    as read."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = os.path.join(self.tmp.name, "source")
+        os.makedirs(self.folder)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _write(self, name, content):
+        path = os.path.join(self.folder, name)
+        mode = "wb" if isinstance(content, bytes) else "w"
+        with open(path, mode,
+                  encoding=None if mode == "wb" else "utf-8") as fh:
+            fh.write(content)
+
+    def test_empty_files_skipped_not_read(self):
+        self._write("real.txt", "the quick brown fox " * 10)
+        self._write("empty.txt", "")
+        self._write("empty.pdf", b"")
+        _, report = build_from_folder(self.folder)
+        self.assertEqual(report.files_read, 1)
+        skipped = dict(report.files_skipped)
+        self.assertEqual(skipped["empty.txt"],
+                         "empty file, nothing to read")
+        self.assertEqual(skipped["empty.pdf"],
+                         "empty file, nothing to read")
+
+    def test_folder_of_only_empty_files_reads_nothing(self):
+        self._write("a.txt", "")
+        self._write("b.md", "")
+        _, report = build_from_folder(self.folder)
+        self.assertEqual(report.files_read, 0)
+        self.assertEqual(report.total_words, 0)
+        self.assertEqual(len(report.files_skipped), 2)
 
 
 if __name__ == "__main__":

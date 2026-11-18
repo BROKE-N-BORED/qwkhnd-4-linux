@@ -3,14 +3,16 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 from fixtures import (
     write_minimal_docx, write_minimal_epub, write_minimal_pdf,
     write_minimal_pdf_pages)
 from qwkhnd.extract import (
     BINARY_REASON, MEDIA_REASON, OLD_OFFICE_REASON,
-    Cancelled, extract_epub, extract_file, extract_pdf,
-    extract_text, scan_folder, strip_html, strip_markdown,
+    Cancelled, _plain_os_error, extract_epub, extract_file,
+    extract_pdf, extract_text, scan_folder, strip_html,
+    strip_markdown,
 )
 
 
@@ -91,7 +93,10 @@ class ExtractTests(unittest.TestCase):
         path = self._write("broken.pdf", b"this is not a pdf at all")
         ok, reason = extract_file(path)
         self.assertFalse(ok)
-        self.assertIn("PDF", reason)
+        self.assertEqual(
+            reason,
+            "could not open as a PDF (the file looks damaged)")
+        self.assertNotIn("EOF", reason)
 
     def test_docx(self):
         path = self._path("doc.docx")
@@ -147,7 +152,10 @@ class ExtractTests(unittest.TestCase):
     def test_missing_file_skipped(self):
         ok, reason = extract_file(self._path("nope.txt"))
         self.assertFalse(ok)
-        self.assertIn("could not read", reason)
+        self.assertEqual(
+            reason,
+            "could not read the file (the file was moved or deleted)")
+        self.assertNotIn("Errno", reason)
 
     def test_no_size_cap(self):
         # T08, Joshua's decision: there is no per-file size cap.
@@ -482,6 +490,86 @@ class ScanFolderTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual([os.path.basename(p) for p in first],
                          ["a.txt", "m.txt", "z.txt"])
+
+
+class PlainReasonTests(unittest.TestCase):
+    """T09 (v0.4): skip reasons are plain words; the technical
+    detail goes to the log, never the UI."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.folder = os.path.join(self.tmp.name, "source")
+        os.makedirs(self.folder)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _path(self, name):
+        return os.path.join(self.folder, name)
+
+    def _write(self, name, content):
+        path = self._path(name)
+        mode = "wb" if isinstance(content, bytes) else "w"
+        with open(path, mode,
+                  encoding=None if mode == "wb" else "utf-8") as fh:
+            fh.write(content)
+        return path
+
+    def test_os_error_mapping(self):
+        self.assertEqual(
+            _plain_os_error(PermissionError(13, "denied")),
+            "could not read the file (permission denied)")
+        self.assertEqual(
+            _plain_os_error(FileNotFoundError(2, "gone")),
+            "could not read the file (the file was moved or deleted)")
+        self.assertEqual(
+            _plain_os_error(OSError(5, "I/O error")),
+            "could not read the file (the file could not be opened)")
+
+    def test_permission_denied_is_plain_words(self):
+        # The tests run as root, so chmod cannot deny a read —
+        # the refusal is mocked instead.
+        path = self._write("locked.txt", "the quick brown fox")
+        with mock.patch("builtins.open",
+                        side_effect=PermissionError(13, "denied")):
+            ok, reason = extract_file(path)
+        self.assertFalse(ok)
+        self.assertEqual(
+            reason, "could not read the file (permission denied)")
+        self.assertNotIn("Errno", reason)
+
+    def test_truncated_pdf_reason_is_plain_words(self):
+        path = self._path("cut.pdf")
+        write_minimal_pdf(path, ["the quick brown fox"])
+        size = os.path.getsize(path)
+        with open(path, "r+b") as fh:
+            fh.truncate(size // 2)
+        ok, reason = extract_file(path)
+        self.assertFalse(ok)
+        self.assertEqual(
+            reason,
+            "could not open as a PDF (the file looks damaged)")
+        self.assertNotIn("Stream", reason)
+
+    def test_technical_detail_goes_to_the_log(self):
+        path = self._write("broken.pdf", b"this is not a pdf at all")
+        logged = []
+
+        class _Log:
+            def info(self, message, *args):
+                logged.append(message % args)
+
+        ok, reason = extract_file(path, log=_Log())
+        self.assertFalse(ok)
+        self.assertEqual(
+            reason,
+            "could not open as a PDF (the file looks damaged)")
+        self.assertEqual(len(logged), 1)
+        self.assertIn("broken.pdf", logged[0])
+        # The pypdf detail ("Stream has ended unexpectedly" —
+        # the exact text F10 found in the UI) lives in the log
+        # now, not the reason.
+        self.assertIn("Stream has ended unexpectedly", logged[0])
 
 
 if __name__ == "__main__":

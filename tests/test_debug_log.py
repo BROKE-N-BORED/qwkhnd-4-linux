@@ -94,6 +94,24 @@ class DebugLoggerTests(unittest.TestCase):
         self.assertIn("Python:", text)
         self.assertIn("RAM:", text)
 
+    def test_report_omits_empty_services_section(self):
+        # T21 (v0.4): no services registered, no Services
+        # section — the old "(none registered)" line under it
+        # is gone. (Settings still prints one when empty; only
+        # Services was always empty in Qwkhnd.)
+        path = self.log.generate_report()
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertNotIn("== Services ==", text)
+
+    def test_report_keeps_services_section_when_registered(self):
+        self.log.register_service("ollama", lambda: "up")
+        path = self.log.generate_report()
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("== Services ==", text)
+        self.assertIn("ollama", text)
+
     def test_crash_handler_writes_a_report(self):
         # T26: calling the installed excepthook writes a report
         # file and still calls the previous hook.

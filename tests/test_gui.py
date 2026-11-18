@@ -26,7 +26,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import (  # noqa: E402
-    QMimeData, QPropertyAnimation, QTimer, Qt, QUrl)
+    QMimeData, QPoint, QPropertyAnimation, QTimer, Qt, QUrl)
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication, QLabel, QLineEdit, QPlainTextEdit, QPushButton,
@@ -35,8 +35,9 @@ from PySide6.QtWidgets import (  # noqa: E402
 from fixtures import write_minimal_docx, write_minimal_pdf  # noqa: E402
 from qwkhnd import APP_NAME, VERSION  # noqa: E402
 from qwkhnd.app import (  # noqa: E402
-    SAMPLE_DIR, SAMPLE_FILES, MainWindow, SingleInstance, app_icon,
-    help_text, quick_start_text, stylesheet)
+    SAMPLE_DIR, SAMPLE_FILES, DictionaryTableModel, MainWindow,
+    SingleInstance, TryItWindow, app_icon, _trim_sample,
+    _whole_words, help_text, quick_start_text, stylesheet)
 from qwkhnd.engine import (  # noqa: E402
     BuildReport, QwkhndDictionary, build_from_folder)
 
@@ -286,10 +287,10 @@ class WindowTests(GuiTestCase):
         self._wait_for_rebuild()
         self.assertEqual(self.window.files_value.text(), "0")
         self.assertEqual(self._row_count(), 0)
-        self.assertIn("No readable text",
+        self.assertIn("empty",
                       self.window.statusBar().currentMessage())
         self.assertTrue(self.window.notice_frame.isVisible())
-        self.assertIn("No readable text",
+        self.assertIn("empty",
                       self.window.notice_label.text())
 
     def test_rebuild_missing_folder_is_not_a_crash(self):
@@ -448,6 +449,14 @@ class WindowTests(GuiTestCase):
             self.window.export_json_button.click()
         _pump()
         self.assertTrue(os.path.exists(json_path))
+        # T12 (v0.4): file name in the bar, full path in the
+        # tooltip.
+        self.assertEqual(
+            self.window.statusBar().currentMessage(),
+            "Dictionary exported to out.json")
+        self.assertEqual(
+            self.window.statusBar().toolTip(),
+            "Last JSON export: %s" % json_path)
         with open(json_path, encoding="utf-8") as fh:
             self.assertIn('"word": "the"', fh.read())
         with mock.patch(
@@ -461,6 +470,14 @@ class WindowTests(GuiTestCase):
                 "the -> ~%s"
                 % self.window.dictionary.word_to_code["the"],
                 fh.read())
+        # T12 (v0.4): the status bar names the file, not the
+        # whole path; the full path is the tooltip.
+        self.assertEqual(
+            self.window.statusBar().currentMessage(),
+            "Dictionary exported to out.txt")
+        self.assertEqual(
+            self.window.statusBar().toolTip(),
+            "Last text export: %s" % text_path)
 
     def test_debug_report_button_writes_a_report(self):
         self.window.debug_button.click()
@@ -472,6 +489,13 @@ class WindowTests(GuiTestCase):
             self.assertIn("Qwkhnd %s" % VERSION, fh.read())
         self.assertIn("Debug report saved",
                       self.window.statusBar().currentMessage())
+        # T12 (v0.4): the status bar names the file only; the
+        # full path is the tooltip.
+        self.assertNotIn(self.data_dir,
+                         self.window.statusBar().currentMessage())
+        self.assertEqual(
+            self.window.statusBar().toolTip(),
+            "Last debug report: %s" % reports[0])
 
     def test_saved_dictionary_loads_on_next_start(self):
         self._fill_source()
@@ -528,7 +552,10 @@ class CorruptDictionaryTests(GuiTestCase):
             self.assertTrue(window.notice_frame.isVisible())
             self.assertIn("damaged", window.notice_label.text())
             self.assertIn("Rebuild", window.notice_label.text())
-            self.assertFalse(window.results_area.isVisible())
+            # T18 (v0.4): the scroll area stays visible (it
+            # holds the checklist); the results inside it hide.
+            self.assertFalse(window._bento_widget.isVisible())
+            self.assertFalse(window.tabs.isVisible())
         finally:
             self._close(window)
 
@@ -580,6 +607,22 @@ class FirstRunTests(GuiTestCase):
             self.assertGreater(len(text.split()), 100)
             self.assertNotIn("\u2014", text)
             self.assertNotIn("&", text)
+
+    def test_checklist_sits_at_the_top_on_first_run(self):
+        # V04-FIX (verify): with the results hidden, the checklist
+        # was the only visible item in the scroll area and the
+        # layout centred it — 220 px of dead space above it on
+        # the first screen. It must sit at the top, before and
+        # after the first rebuild.
+        _pump()
+        y = self.window.checklist_frame.geometry().y()
+        self.assertLessEqual(y, 2, "checklist floats: y=%d" % y)
+        self.window.folder_edit.setText(SAMPLE_DIR)
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        _pump()
+        y = self.window.checklist_frame.geometry().y()
+        self.assertLessEqual(y, 2, "checklist floats: y=%d" % y)
 
     def test_samples_not_readded_after_deletion(self):
         folder = self._source_folder()
@@ -676,11 +719,20 @@ class FirstRunTests(GuiTestCase):
             second.deleteLater()
             _pump()
 
-    def test_checklist_goes_away_after_first_rebuild(self):
+    def test_checklist_stays_until_try_it_done(self):
+        # T13 (v0.4): the checklist no longer vanishes with the
+        # first rebuild — it stays until step 3 (Try it) is
+        # done, and it survives a restart in between.
         self.assertTrue(self.window.checklist_frame.isVisible())
         self.window.rebuild_button.click()
         self._wait_for_rebuild()
-        self.assertFalse(self.window.checklist_frame.isVisible())
+        self.assertTrue(self.window.checklist_frame.isVisible())
+        self.assertTrue(
+            self.window.check_step1.text().startswith("\u2713"))
+        self.assertTrue(
+            self.window.check_step2.text().startswith("\u2713"))
+        self.assertTrue(
+            self.window.check_step3.text().startswith("\u25cb"))
         self.window.close()
         _pump()
         second = MainWindow(data_dir=self.data_dir,
@@ -688,10 +740,29 @@ class FirstRunTests(GuiTestCase):
         second.show()
         _pump()
         try:
+            # A loaded dictionary still counts as a rebuild.
+            self.assertTrue(second.checklist_frame.isVisible())
+            self.assertTrue(
+                second.check_step2.text().startswith("\u2713"))
+            second._show_try_it()
+            tryit = second._tryit_window
+            tryit.try_input.setPlainText("the quick brown fox")
+            tryit.encode_button.click()
+            _pump()
             self.assertFalse(second.checklist_frame.isVisible())
         finally:
             second.close()
             second.deleteLater()
+            _pump()
+        third = MainWindow(data_dir=self.data_dir,
+                           settings_path=self.settings_path)
+        third.show()
+        _pump()
+        try:
+            self.assertFalse(third.checklist_frame.isVisible())
+        finally:
+            third.close()
+            third.deleteLater()
             _pump()
 
 
@@ -700,15 +771,20 @@ class DisclosureTests(GuiTestCase):
     the first rebuild; Try it is its own window."""
 
     def test_first_screen_shows_only_folder_rebuild_checklist(self):
-        self.assertFalse(self.window.results_area.isVisible())
+        # T18 (v0.4): the scroll area itself stays visible (it
+        # holds the checklist); the results inside it hide.
+        self.assertFalse(self.window._bento_widget.isVisible())
+        self.assertFalse(self.window.tabs.isVisible())
+        self.assertFalse(self.window.tryit_button.isVisible())
         self.assertTrue(self.window.checklist_frame.isVisible())
         self.assertTrue(self.window.folder_edit.isVisible())
         self.assertTrue(self.window.rebuild_button.isVisible())
 
     def test_results_appear_after_first_rebuild(self):
-        self.assertFalse(self.window.results_area.isVisible())
+        self.assertFalse(self.window._bento_widget.isVisible())
         self.window.rebuild_button.click()
         self._wait_for_rebuild()
+        self.assertTrue(self.window._bento_widget.isVisible())
         self.assertTrue(self.window.results_area.isVisible())
         self.assertTrue(self.window.tabs.isVisible())
         self.assertTrue(self.window.tryit_button.isVisible())
@@ -719,6 +795,13 @@ class DisclosureTests(GuiTestCase):
         self._fill_source()
         self.window.rebuild_button.click()
         self._wait_for_rebuild()
+        # T13 (v0.4): the checklist only hides once step 3
+        # (Try it) is done, so finish it before restarting.
+        self.window._show_try_it()
+        tryit = self.window._tryit_window
+        tryit.try_input.setPlainText("the quick brown fox")
+        tryit.encode_button.click()
+        _pump()
         self.window.close()
         _pump()
         second = MainWindow(data_dir=self.data_dir,
@@ -736,8 +819,10 @@ class DisclosureTests(GuiTestCase):
     def test_no_tryit_tab(self):
         labels = [self.window.tabs.tabText(i)
                   for i in range(self.window.tabs.count())]
-        self.assertEqual(labels,
-                         ["Dictionary", "Skipped files", "Help"])
+        self.assertEqual(
+            labels,
+            ["Dictionary", "Skipped files", "Help",
+             "Words without codes"])
 
     def test_tryit_opens_from_button_and_menu(self):
         self._fill_source()
@@ -908,7 +993,7 @@ class BentoTests(GuiTestCase):
         self.assertGreater(int(self.window.words_value.text()), 0)
         self.assertGreater(int(self.window.codes_value.text()), 0)
         self.assertIn("different", self.window.words_label.text())
-        self.assertIn("100 characters",
+        self.assertIn("before and after",
                       self.window.sample_caption.text())
         self.assertIn("->", self.window.sample_label.text())
 
@@ -1071,6 +1156,694 @@ class RestoreTests(GuiTestCase):
                       self.window.notice_label.text())
 
 
+class NoResultRebuildTests(GuiTestCase):
+    """T01/T02 (v0.4): a rebuild that produces zero codes never
+    wipes the dictionary, and the notice names the real case."""
+
+    def _rebuild_with(self, text=None, files=None):
+        folder = self._source_folder()
+        for name in os.listdir(folder):
+            os.remove(os.path.join(folder, name))
+        if text is not None:
+            with open(os.path.join(folder, "a.txt"), "w",
+                      encoding="utf-8") as fh:
+                fh.write(text)
+        if files:
+            for name, data in files.items():
+                with open(os.path.join(folder, name), "wb") as fh:
+                    fh.write(data)
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+
+    def _saved_entries(self, path):
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return {entry["word"]: entry["code"]
+                for entry in data["entries"]}
+
+    def test_empty_rebuild_keeps_the_dictionary(self):
+        self._rebuild_with("the quick brown fox " * 10)
+        before = dict(self.window.dictionary.word_to_code)
+        self.assertGreater(len(before), 0)
+        with open(self.window.dict_path, encoding="utf-8") as fh:
+            saved_before = fh.read()
+        self._rebuild_with()  # empty folder
+        self.assertEqual(self.window.dictionary.word_to_code,
+                         before)
+        with open(self.window.dict_path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), saved_before)
+        self.assertFalse(
+            os.path.exists(self.window.previous_dict_path))
+        self.assertTrue(self.window.notice_frame.isVisible())
+        self.assertIn("empty", self.window.notice_label.text())
+        self.assertIn("unchanged", self.window.notice_label.text())
+        self.assertTrue(self.window.results_area.isVisible())
+        self.assertNotEqual(self.window.codes_value.text(), "0")
+
+    def test_second_empty_rebuild_keeps_it_too(self):
+        # The task list's own scenario: two good rebuilds, then
+        # an empty folder, then an images-only folder.
+        self._rebuild_with("the quick brown fox " * 10)
+        first = dict(self.window.dictionary.word_to_code)
+        self._rebuild_with("lazy dog sleeps soundly " * 10)
+        second = dict(self.window.dictionary.word_to_code)
+        self.assertNotEqual(first, second)
+        with open(self.window.previous_dict_path,
+                  encoding="utf-8") as fh:
+            previous_before = fh.read()
+        self._rebuild_with()  # empty folder
+        self._rebuild_with(files={
+            "photo.png": b"\x89PNG\r\n\x1a\n" + b"\x00" * 64})
+        self.assertEqual(self.window.dictionary.word_to_code,
+                         second)
+        self.assertEqual(
+            self._saved_entries(self.window.dict_path), second)
+        with open(self.window.previous_dict_path,
+                  encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), previous_before)
+        self.assertTrue(self.window.notice_frame.isVisible())
+        self.assertIn("Skipped files tab",
+                      self.window.notice_label.text())
+        # Restore still brings back the first dictionary.
+        self.window._restore_previous_dictionary()
+        self.assertEqual(self.window.dictionary.word_to_code,
+                         first)
+
+    def test_restore_of_empty_previous_warns(self):
+        self._rebuild_with("the quick brown fox " * 10)
+        before = dict(self.window.dictionary.word_to_code)
+        empty = {"app": "Qwkhnd", "version": "0.4", "marker": "~",
+                 "entries": []}
+        with open(self.window.previous_dict_path, "w",
+                  encoding="utf-8") as fh:
+            json.dump(empty, fh)
+        self.window._restore_previous_dictionary()
+        self.assertEqual(self.window.dictionary.word_to_code,
+                         before)
+        self.assertTrue(self.window.notice_frame.isVisible())
+        self.assertIn("empty", self.window.notice_label.text())
+        self.assertNotIn(
+            "Restored the previous dictionary",
+            self.window.statusBar().currentMessage())
+
+    def test_tiny_words_rebuild_keeps_dictionary_and_explains(self):
+        self._rebuild_with("the quick brown fox " * 10)
+        before = dict(self.window.dictionary.word_to_code)
+        self._rebuild_with("ab cd ef gh " * 50)
+        self.assertEqual(self.window.dictionary.word_to_code,
+                         before)
+        self.assertTrue(self.window.notice_frame.isVisible())
+        self.assertIn("long enough to shorten",
+                      self.window.notice_label.text())
+        self.assertIn("unchanged", self.window.notice_label.text())
+
+    def test_empty_folder_with_no_dictionary_says_so(self):
+        folder = self._source_folder()
+        for name in os.listdir(folder):
+            os.remove(os.path.join(folder, name))
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        self.assertEqual(len(self.window.dictionary), 0)
+        self.assertTrue(self.window.notice_frame.isVisible())
+        self.assertIn("empty", self.window.notice_label.text())
+        self.assertNotIn("unchanged",
+                         self.window.notice_label.text())
+
+    def test_unreadable_files_case_points_at_skipped_tab(self):
+        self._rebuild_with(files={
+            "photo.png": b"\x89PNG\r\n\x1a\n" + b"\x00" * 64})
+        self.assertTrue(self.window.notice_frame.isVisible())
+        self.assertIn("Skipped files tab",
+                      self.window.notice_label.text())
+        self.assertIn("1 skipped", self.window.notice_label.text())
+        self.assertEqual(self.window.skipped_list.count(), 1)
+
+    def _start_with_dict_and_previous(self, content, previous):
+        data_dir = os.path.join(self.tmp.name, "data-corrupt-prev")
+        os.makedirs(os.path.join(data_dir, "Source Material"))
+        with open(os.path.join(data_dir,
+                               "qwkhnd-dictionary.json"),
+                  "w", encoding="utf-8") as fh:
+            fh.write(content)
+        if previous is not None:
+            with open(os.path.join(
+                    data_dir,
+                    "qwkhnd-dictionary.previous.json"),
+                    "w", encoding="utf-8") as fh:
+                json.dump(previous, fh)
+        window = MainWindow(
+            data_dir=data_dir,
+            settings_path=os.path.join(
+                self.tmp.name, "settings-corrupt-prev.ini"))
+        window.show()
+        _pump()
+        return window
+
+    def test_corrupt_notice_names_restore_when_previous_exists(self):
+        good = {"app": "Qwkhnd", "version": "0.4", "marker": "~",
+                "entries": [{"word": "the", "code": "a",
+                             "count": 5}]}
+        window = self._start_with_dict_and_previous(
+            "{ not json", good)
+        try:
+            self.assertFalse(window.dictionary)
+            self.assertTrue(window.notice_frame.isVisible())
+            self.assertIn("Restore previous dictionary",
+                          window.notice_label.text())
+        finally:
+            window.close()
+            window.deleteLater()
+            _pump()
+
+    def test_corrupt_notice_omits_restore_without_previous(self):
+        window = self._start_with_dict_and_previous(
+            "{ not json", None)
+        try:
+            self.assertFalse(window.dictionary)
+            self.assertTrue(window.notice_frame.isVisible())
+            self.assertNotIn("Restore",
+                             window.notice_label.text())
+        finally:
+            window.close()
+            window.deleteLater()
+            _pump()
+
+
+class TabScrollTests(GuiTestCase):
+    """T03 (v0.4): switching tabs keeps the results scroll
+    position, so the hero tile stays visible."""
+
+    def test_tab_switch_keeps_scroll_at_zero(self):
+        self._fill_source()
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        bar = self.window.results_area.verticalScrollBar()
+        self.assertEqual(bar.value(), 0)
+        # The bug needs focus inside the scroll area and a
+        # programmatic switch: after a mouse rebuild focus lands
+        # on the search box (the rebuild button is disabled
+        # during the run, so focus moves on), and the switch
+        # then moves focus to the new page's first widget — the
+        # scroll area scrolls to show it. A plain .click()
+        # leaves focus on the folder field, so the scroll never
+        # fires — set it the way a real rebuild does.
+        self.window.search_edit.setFocus()
+        _pump()
+        self.assertEqual(bar.value(), 0)
+        for widget in (self.window._skipped_tab_widget,
+                       self.window._help_tab_widget,
+                       self.window._dictionary_tab_widget):
+            self.window.tabs.setCurrentWidget(widget)
+            QTest.qWait(300)
+            _pump()
+            self.assertEqual(bar.value(), 0)
+        # The same, through the paths a user takes: the Skipped
+        # link, then a mouse click on the tab bar.
+        self.window.search_edit.setFocus()
+        _pump()
+        self.assertTrue(self.window.skipped_link.isVisible())
+        QTest.mouseClick(self.window.skipped_link, Qt.LeftButton)
+        QTest.qWait(300)
+        _pump()
+        self.assertEqual(self.window.tabs.currentIndex(), 1)
+        self.assertEqual(bar.value(), 0)
+        tabbar = self.window.tabs.tabBar()
+        QTest.mouseClick(tabbar, Qt.LeftButton,
+                         pos=tabbar.tabRect(0).center())
+        QTest.qWait(300)
+        _pump()
+        self.assertEqual(self.window.tabs.currentIndex(), 0)
+        self.assertEqual(bar.value(), 0)
+        # The hero tile is fully visible in the viewport: its top
+        # edge sits at or below the viewport's top edge.
+        top = self.window.hero_tile.mapTo(
+            self.window.results_area.viewport(), QPoint(0, 0)).y()
+        self.assertGreaterEqual(top, 0)
+
+    def test_tab_switch_keeps_a_deliberate_scroll(self):
+        self._fill_source()
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        bar = self.window.results_area.verticalScrollBar()
+        # The post-rebuild layout is scheduled, not instant: under
+        # full-suite load the maximum still reads 0 right after
+        # the rebuild returns (suite-final.log, 1 failure).
+        # Poll briefly instead of asserting on a stale layout.
+        deadline = time.monotonic() + 2.0
+        while bar.maximum() == 0 and time.monotonic() < deadline:
+            QTest.qWait(100)
+            _pump()
+        self.assertGreater(bar.maximum(), 0)
+        self.window.search_edit.setFocus()
+        _pump()
+        bar.setValue(bar.maximum() // 2)
+        _pump()
+        saved = bar.value()
+        self.assertGreater(saved, 0)
+        self.window.tabs.setCurrentWidget(
+            self.window._skipped_tab_widget)
+        QTest.qWait(300)
+        _pump()
+        self.assertEqual(bar.value(), saved)
+        # The guard releases: a scroll after the settle window
+        # works.
+        QTest.qWait(400)
+        bar.setValue(0)
+        _pump()
+        self.assertEqual(bar.value(), 0)
+
+
+class HeroLabelTests(GuiTestCase):
+    """T04 (v0.4): the hero number names its basis, so it agrees
+    with the sample tile next to it."""
+
+    def test_hero_names_the_sample_size(self):
+        self._fill_source()
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        self.assertIn("1,500", self.window.hero_sub.text())
+        self.assertIn("characters saved",
+                      self.window.hero_sub.text())
+        self.assertIn("before and after",
+                      self.window.sample_caption.text())
+
+
+class SampleTrimTests(GuiTestCase):
+    """T08 (v0.4): the sample is never cut mid-code or mid-word."""
+
+    def test_short_text_unchanged(self):
+        self.assertEqual(_trim_sample("hello world", 100),
+                         "hello world")
+
+    def test_cut_at_word_boundary_with_ellipsis(self):
+        text = "alpha beta gamma delta epsilon zeta eta theta"
+        trimmed = _trim_sample(text, 20)
+        self.assertTrue(trimmed.endswith("…"))
+        self.assertNotIn("delt", trimmed)
+        self.assertEqual(trimmed, "alpha beta gamma…")
+
+    def test_code_cut_in_half_is_dropped(self):
+        # The limit falls inside the code ~ab: the partial code
+        # goes away entirely, not a lone "~".
+        text = "the quick brown fox ~ab and more words here"
+        trimmed = _trim_sample(text, 21)
+        self.assertEqual(trimmed, "the quick brown fox…")
+        self.assertNotIn("~", trimmed)
+
+    def test_trailing_marker_stripped(self):
+        text = "x" * 99 + "~ab and more words"
+        trimmed = _trim_sample(text, 100)
+        self.assertNotIn("~", trimmed)
+        self.assertTrue(trimmed.endswith("…"))
+
+    def test_no_space_keeps_the_slice(self):
+        text = "x" * 150
+        self.assertEqual(_trim_sample(text, 100), "x" * 100 + "…")
+
+    def test_displayed_sample_never_ends_mid_code(self):
+        self.window._set_sample(
+            "the quick brown fox jumps over the lazy dog " * 5,
+            "x" * 99 + "~ab and more words here")
+        label = self.window.sample_label.text()
+        self.assertIn("…", label)
+        self.assertNotIn("~'", label)
+        self.assertNotIn("~…", label)
+        self.assertNotIn("100 characters",
+                         self.window.sample_caption.text())
+
+    def test_short_joined_slice_loses_its_lone_marker(self):
+        # Found by eyeballing the drive's main screenshot: the
+        # shipped samples join to 99 chars ending in " ~" — under
+        # the limit, so the old code returned it untouched and the
+        # tile showed a lone "~". A lone trailing marker is
+        # always a cut code, at any length.
+        self.assertEqual(_trim_sample("alpha beta ~", 100),
+                         "alpha beta")
+        self.assertEqual(_trim_sample("~", 100), "")
+
+    def test_real_escape_survives_the_short_path(self):
+        # A literal "~" is written as "~~": it ends in "~~",
+        # not " ~", so the lone-marker strip must leave it.
+        self.assertEqual(_trim_sample("alpha ~~", 100),
+                         "alpha ~~")
+
+    def test_shipped_samples_show_no_lone_marker(self):
+        # The real corpus that caught this: rebuild from the
+        # shipped samples and check the tile itself.
+        self.window.folder_edit.setText(SAMPLE_DIR)
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        label = self.window.sample_label.text()
+        self.assertFalse(label.endswith("~'"), label)
+        self.assertNotIn(" ~'", label)
+
+    def test_whole_words_drops_a_cut_fragment(self):
+        # V04-FIX (verify): the 100-char slice ends inside
+        # "fragmented" — the "fragm" goes.
+        joined = " ".join(["word"] * 19)
+        before = joined + " fragmented words follow here"
+        self.assertEqual(_whole_words(before[:100], before),
+                         joined)
+
+    def test_whole_words_keeps_a_clean_cut(self):
+        # The slice ends on a space: the last word is whole.
+        before = " ".join(["word"] * 20) + " more words follow"
+        self.assertEqual(_whole_words(before[:100], before),
+                         " ".join(["word"] * 20))
+
+    def test_whole_words_keeps_short_text(self):
+        self.assertEqual(_whole_words("short text", "short text"),
+                         "short text")
+
+    def test_whole_words_keeps_a_single_token(self):
+        # One long word has nowhere better to break.
+        self.assertEqual(_whole_words("x" * 100, "x" * 150),
+                         "x" * 100)
+
+    def test_set_sample_never_ends_mid_word(self):
+        # End to end: the stored sample (and the tile, and the
+        # Try-it sample button) ends on a whole word.
+        before = " ".join(["word"] * 19) + " fragmented tail here"
+        after = " ".join(["code"] * 19) + " fragmented tail here"
+        self.window._set_sample(before, after)
+        self.assertEqual(self.window._sample_before,
+                         " ".join(["word"] * 19))
+        self.assertEqual(self.window._sample_after,
+                         " ".join(["code"] * 19))
+        self.assertNotIn("fragm", self.window.sample_label.text())
+
+
+class TableRoomTests(GuiTestCase):
+    """T10 (v0.4): the table shows 8+ rows at default size."""
+
+    def _rows_on_screen(self):
+        """Full table rows actually visible in the window: the
+        table viewport's height alone lies, because the table
+        can run past the bottom of the results viewport."""
+        table_view = self.window.table.viewport()
+        results_view = self.window.results_area.viewport()
+        rect = table_view.rect()
+        top = table_view.mapTo(results_view,
+                               rect.topLeft()).y()
+        bottom = table_view.mapTo(results_view,
+                                  rect.bottomRight()).y()
+        visible = max(0, min(bottom, results_view.height())
+                      - max(top, 0))
+        return visible // self.window.table.rowHeight(0)
+
+    def test_eight_rows_visible_at_default_size(self):
+        self._fill_source()
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        # T18 (v0.4): the checklist is a transient onboarding
+        # element — dismiss it for the steady-state measure,
+        # the way a user past onboarding sees the table.
+        self.window.checklist_dismiss.click()
+        _pump()
+        self.assertGreaterEqual(self._rows_on_screen(), 8)
+        # The progress row is hidden when idle, which is what
+        # paid for the room.
+        self.assertFalse(self.window.progress_bar.isVisible())
+        self.assertFalse(self.window.progress_label.isVisible())
+
+    def test_scrolling_past_checklist_shows_eight_rows(self):
+        # T18 (v0.4): with the checklist still visible it sits
+        # above the bento inside the scroll area — scrolling
+        # down past it recovers the full 8 rows, which a
+        # checklist fixed above the scroll area could never do.
+        self._fill_source()
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        self.assertTrue(self.window.checklist_frame.isVisible())
+        # Let the post-rebuild layout settle before reading the
+        # scrollbar maximum — it is 0 until the content has its
+        # height, and setValue(0) scrolls nowhere.
+        QTest.qWait(200)
+        bar = self.window.results_area.verticalScrollBar()
+        self.assertGreater(bar.maximum(), 0)
+        bar.setValue(bar.maximum())
+        QTest.qWait(200)
+        self.assertGreaterEqual(self._rows_on_screen(), 8)
+
+    def test_progress_row_shows_while_rebuilding(self):
+        # Hiding the row when idle must not hide it while a
+        # rebuild runs: the bar is the progress (U26).
+        # _set_working(True) runs synchronously in rebuild(), so
+        # the row is visible right after the click — no need to
+        # wait for a progress signal (a small rebuild can finish
+        # before the first poll).
+        self._fill_source()
+        self.window.rebuild_button.click()
+        _pump()
+        self.assertTrue(self.window.progress_bar.isVisible())
+        self.assertTrue(self.window.progress_label.isVisible())
+        self._wait_for_rebuild()
+        self.assertFalse(self.window.progress_bar.isVisible())
+        self.assertFalse(self.window.progress_label.isVisible())
+
+
+class TableCopyTests(GuiTestCase):
+    """T10 (v0.4): the right-click copy menu."""
+
+    def _menu_for_row_0(self):
+        self._fill_source()
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        index = self.window.table_model.index(0, 0)
+        return self.window._table_menu_for(index)
+
+    def _trigger(self, menu, text):
+        for action in menu.actions():
+            if action.text() == text:
+                action.trigger()
+                return
+        self.fail("no action %r" % text)
+
+    def test_menu_offers_copy_word_code_row(self):
+        menu = self._menu_for_row_0()
+        texts = [action.text() for action in menu.actions()]
+        self.assertEqual(texts, ["Copy word", "Copy code", "Copy row"])
+
+    def test_copy_code_lands_on_clipboard(self):
+        menu = self._menu_for_row_0()
+        _word, code, _count = self.window.table_model.entry_at(0)
+        self._trigger(menu, "Copy code")
+        self.assertEqual(QApplication.clipboard().text(),
+                         "~" + code)
+
+    def test_copy_word_and_row(self):
+        menu = self._menu_for_row_0()
+        word, code, _count = self.window.table_model.entry_at(0)
+        self._trigger(menu, "Copy word")
+        self.assertEqual(QApplication.clipboard().text(), word)
+        self._trigger(menu, "Copy row")
+        self.assertEqual(QApplication.clipboard().text(),
+                         "%s: ~%s" % (word, code))
+
+    def test_tooltip_names_right_click_and_ctrl_c(self):
+        tip = self.window.table.toolTip()
+        self.assertIn("Right-click", tip)
+        self.assertIn("Ctrl+C", tip)
+
+
+class ModelSortTests(unittest.TestCase):
+    """T10 (v0.4): the table model's sorting, without a window."""
+
+    def setUp(self):
+        self.model = DictionaryTableModel()
+        self.model.set_entries([("banana", "a", 5),
+                                ("apple", "b", 9),
+                                ("cherry", "c", 1)])
+
+    def _words(self):
+        return [self.model.data(self.model.index(row, 0))
+                for row in range(self.model.rowCount())]
+
+    def test_sort_by_word(self):
+        self.model.sort(0, Qt.AscendingOrder)
+        self.assertEqual(self._words(),
+                         ["apple", "banana", "cherry"])
+        self.model.sort(0, Qt.DescendingOrder)
+        self.assertEqual(self._words(),
+                         ["cherry", "banana", "apple"])
+
+    def test_sort_by_count(self):
+        self.model.sort(2, Qt.AscendingOrder)
+        self.assertEqual(self._words(),
+                         ["cherry", "banana", "apple"])
+        self.model.sort(2, Qt.DescendingOrder)
+        self.assertEqual(self._words(),
+                         ["apple", "banana", "cherry"])
+
+    def test_sort_survives_new_entries(self):
+        self.model.sort(0, Qt.AscendingOrder)
+        self.model.set_entries([("zebra", "d", 2),
+                                ("mango", "e", 3)])
+        self.assertEqual(self._words(), ["mango", "zebra"])
+        self.assertEqual(self.model.sort_description(), "Word")
+
+    def test_no_sort_by_default(self):
+        self.assertIsNone(self.model.sort_description())
+        self.assertEqual(self._words(),
+                         ["banana", "apple", "cherry"])
+
+
+class TableSortTests(GuiTestCase):
+    """T10 (v0.4): header-click sorting in the window."""
+
+    def _words_in_table(self):
+        model = self.window.table_model
+        return [model.data(model.index(row, 0))
+                for row in range(model.rowCount())]
+
+    def _click_header(self, section):
+        header = self.window.table.horizontalHeader()
+        x = header.sectionViewportPosition(section) \
+            + header.sectionSize(section) // 2
+        QTest.mouseClick(header.viewport(), Qt.LeftButton,
+                         pos=QPoint(x, header.height() // 2))
+        _pump()
+
+    def test_click_word_header_sorts_then_reverses(self):
+        self._fill_source()
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        self._click_header(0)
+        words = self._words_in_table()
+        self.assertEqual(words, sorted(words))
+        self.assertIn("Sorted by Word",
+                      self.window.table_count_label.text())
+        self._click_header(0)
+        words = self._words_in_table()
+        self.assertEqual(words, sorted(words, reverse=True))
+
+    def test_sort_keeps_the_selection_on_its_word(self):
+        self._fill_source()
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        model = self.window.table_model
+        word = model.data(model.index(0, 0))
+        self.window.table.setCurrentIndex(model.index(0, 0))
+        self._click_header(0)
+        current = self.window.table.currentIndex()
+        self.assertTrue(current.isValid())
+        self.assertEqual(model.data(model.index(current.row(), 0)),
+                         word)
+
+    def test_sort_survives_a_search(self):
+        self._fill_source()
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        self._click_header(0)
+        self.window.search_edit.setText("e")
+        self._wait_for_search()
+        words = self._words_in_table()
+        self.assertEqual(words, sorted(words))
+        self.assertIn("Sorted by Word",
+                      self.window.table_count_label.text())
+
+
+class ProgressStoryTests(GuiTestCase):
+    """T05 (v0.4): one progress story — the label keeps the
+    overall file count, and a small file never flashes 100%."""
+
+    def test_file_progress_keeps_the_overall_label(self):
+        # Drive the progress handlers directly: a file that read
+        # in one chunk (fraction 1.0) must not touch the label.
+        # The handlers ignore calls with no worker running, so a
+        # stand-in stands in for one.
+        self.window._worker = object()
+        try:
+            self.window._on_progress(5, 150, "story-04.txt")
+            label = self.window.progress_label.text()
+            self.assertIn("file 5 of 150", label)
+            self.window._on_file_progress("story-04.txt", 1.0)
+            self.assertEqual(self.window.progress_label.text(), label)
+            self.assertNotIn("100%", label)
+            # A big file mid-read reports in the status bar only.
+            self.window._on_file_progress("big-book.txt", 0.5)
+            self.assertEqual(self.window.progress_label.text(), label)
+            self.assertIn("50%",
+                          self.window.statusBar().currentMessage())
+        finally:
+            self.window._worker = None
+
+    def test_rebuild_label_never_shows_100_percent(self):
+        # A 150-file rebuild: sample the label while it runs; it
+        # must always carry the overall story, never an in-file
+        # percentage.
+        folder = self._source_folder()
+        for number in range(150):
+            with open(os.path.join(folder, "story-%02d.txt" % number),
+                      "w", encoding="utf-8") as fh:
+                fh.write("the quick brown fox chapter %d " % number
+                         * 20)
+        self.window.rebuild_button.click()
+        seen = set()
+        deadline = time.monotonic() + 60
+        while not self.window._rebuild_done:
+            QTest.qWait(20)
+            seen.add(self.window.progress_label.text())
+            if time.monotonic() > deadline:
+                self.fail("rebuild did not finish")
+        for label in seen:
+            self.assertNotIn("100%", label)
+        self.assertTrue(
+            any(re.search(r"file \d+ of \d+", label)
+                for label in seen),
+            "no overall progress label seen: %r" % (seen,))
+
+
+class FolderValidationLiveTests(GuiTestCase):
+    """T06 (v0.4): the folder warning updates on startup and on
+    every change of the field, not only on focus loss."""
+
+    def test_moved_folder_warns_on_startup(self):
+        # Rebuild from a folder, close, move the folder away,
+        # reopen with the same settings: the warning is there
+        # immediately, with no focus dance. The folder must not
+        # be the default one: the window recreates its default
+        # Source Material folder on start.
+        folder = os.path.join(self.tmp.name, "custom-source")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "a.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("the quick brown fox " * 10)
+        self.window.folder_edit.setText(folder)
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        self.window.close()
+        self.window.deleteLater()
+        _pump()
+        gone = os.path.join(self.tmp.name, "moved-away")
+        os.rename(folder, gone)
+        window = MainWindow(data_dir=self.data_dir,
+                            settings_path=self.settings_path)
+        window.show()
+        _pump()
+        try:
+            self.assertEqual(window.folder_warning.text(),
+                             "That folder does not exist.")
+        finally:
+            window.close()
+            window.deleteLater()
+            _pump()
+
+    def test_warning_clears_without_focus_change(self):
+        path = os.path.join(self.tmp.name, "a.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("x")
+        self.window.folder_edit.setText(path)
+        _pump()
+        self.assertIn("not a folder",
+                      self.window.folder_warning.text())
+        # No editingFinished, no click: setting the text to a real
+        # folder clears the warning at once.
+        self.window.folder_edit.setText(self._source_folder())
+        _pump()
+        self.assertEqual(self.window.folder_warning.text(), "")
+
+
 class NoticeTests(GuiTestCase):
     """T5: the inline notice for failures."""
 
@@ -1091,7 +1864,7 @@ class NoticeTests(GuiTestCase):
         self.window.rebuild_button.click()
         self._wait_for_rebuild()
         self.assertTrue(self.window.notice_frame.isVisible())
-        self.assertIn("No readable text",
+        self.assertIn("empty",
                       self.window.notice_label.text())
 
     def test_export_failure_shows_notice(self):
@@ -1159,6 +1932,26 @@ class SkippedBadgeTests(GuiTestCase):
         self.assertEqual(
             self.window.tabs.currentWidget(),
             self.window._skipped_tab_widget)
+
+    def test_empty_file_listed_as_skipped(self):
+        # T09 (v0.4): an empty file is listed with its reason,
+        # not silently counted as read.
+        self._fill_source()
+        with open(os.path.join(self._source_folder(), "empty.txt"),
+                  "w", encoding="utf-8"):
+            pass
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        index = self.window.tabs.indexOf(
+            self.window._skipped_tab_widget)
+        self.assertEqual(self.window.tabs.tabText(index),
+                         "Skipped files (2)")
+        items = [self.window.skipped_list.item(row).text()
+                 for row in range(self.window.skipped_list.count())]
+        self.assertTrue(
+            any("empty.txt" in item and "empty file" in item
+                for item in items),
+            items)
 
 
 class StateTests(GuiTestCase):
@@ -1234,6 +2027,9 @@ class HelpSplitTests(GuiTestCase):
         self.assertIn("Quick start", text)
         self.assertIn("Rebuild dictionary", text)
         self.assertIn("Try it window", text)
+        # T21 (v0.4): the quick start names the Try it button,
+        # not just the View menu.
+        self.assertIn("Try it button", text)
         self.assertNotIn("OCR", text)
 
     def test_how_to_use_window_keeps_the_limits(self):
@@ -1252,6 +2048,15 @@ class HelpSplitTests(GuiTestCase):
         self.assertIn("OCR", text)
         self.assertIn("offline", text)
         self.assertIn(".docx", text)
+        # T21 (v0.4): the "What it skips" section names
+        # symlinks and the app's own files, and "How to use"
+        # names the Try it button.
+        self.assertIn("Symbolic links", text)
+        self.assertIn("own dictionary and log files", text)
+        self.assertIn(
+            "Try it out in the Try it window (the Try it "
+            "button, or the",
+            text)
         howto.close()
 
     def test_how_to_use_index_switches_sections(self):
@@ -1598,11 +2403,36 @@ class DragDropTests(GuiTestCase):
         self.window.dropEvent(self._drop_event([source]))
         numbered = os.path.join(folder, "same (2).txt")
         self.assertTrue(os.path.exists(numbered))
+        # T14 (v0.4): the message names the new name.
+        self.assertEqual(
+            self.window.statusBar().currentMessage(),
+            "Added 1 file as same (2).txt (that name was "
+            "taken). Press Rebuild to use it.")
         with open(numbered, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "second")
         with open(os.path.join(folder, "same.txt"),
                   encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "first")
+
+    def test_drop_several_with_a_rename_counts_them(self):
+        # T14 (v0.4): several files with one rename get a count
+        # and an example of the new name.
+        folder = self._source_folder()
+        with open(os.path.join(folder, "dropped.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("already here")
+        first = os.path.join(self.tmp.name, "dropped.txt")
+        second = os.path.join(self.tmp.name, "fresh.txt")
+        for path in (first, second):
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("the quick brown fox")
+        event = self._drop_event([first, second])
+        self.window.dropEvent(event)
+        self.assertTrue(event.isAccepted())
+        self.assertEqual(
+            self.window.statusBar().currentMessage(),
+            "Added 2 files (1 saved under a new name, e.g. "
+            "dropped (2).txt). Press Rebuild to use them.")
 
     def test_drop_folder_sets_source_folder(self):
         target = os.path.join(self.tmp.name, "other")
@@ -1659,8 +2489,12 @@ class ValidationTests(GuiTestCase):
         self._wait_for_search()
         self.assertTrue(
             self.window.search_empty_label.isVisible())
-        self.assertIn("No words match",
-                      self.window.search_empty_label.text())
+        # T15 (v0.4): the guidance names the cause and the fix.
+        self.assertEqual(
+            self.window.search_empty_label.text(),
+            "No words match. It may not be in your Source "
+            "Material. Try a shorter word, or rebuild with "
+            "files that use it.")
         self.window.search_edit.setText("")
         self._wait_for_search()
         self.assertFalse(
@@ -1689,9 +2523,15 @@ class TooltipsAndShortcutsTests(GuiTestCase):
         self.assertIn("Ctrl+E",
                       window.tryit_button.toolTip())
 
-    def test_search_hint_under_search_box(self):
-        self.assertEqual(self.window.search_hint.text(),
-                         "Type part of a word to find its code.")
+    def test_search_field_explains_itself(self):
+        # T14, T10 (v0.4): the hint line under the search box is
+        # gone (its 18 px are a row of the table); the field
+        # still explains itself through its placeholder and its
+        # tooltip.
+        self.assertEqual(self.window.search_edit.placeholderText(),
+                         "Search the dictionary...")
+        self.assertIn("Search the dictionary by word",
+                      self.window.search_edit.toolTip())
 
     def test_shortcuts_window_opens_from_help_menu(self):
         help_menu = None
@@ -1749,6 +2589,9 @@ class TryItWindowTests(GuiTestCase):
     geometry, button states."""
 
     def test_round_trip_exact(self):
+        # T07 (v0.4): Decode reads the input box now, so the
+        # round-trip goes through it: encode, put the shorthand
+        # back into the input, decode, get the original text.
         self._fill_source()
         self.window.rebuild_button.click()
         self._wait_for_rebuild()
@@ -1761,47 +2604,94 @@ class TryItWindowTests(GuiTestCase):
         self.assertIn("~", encoded)
         self.assertLess(len(encoded), len(text))
         self.assertIn("saved", tryit.try_result.text())
+        tryit.try_input.setPlainText(encoded)
         tryit.decode_button.click()
         _pump()
-        self.assertIn("exact", tryit.try_result.text())
+        self.assertIn("Decoded", tryit.try_result.text())
         self.assertEqual(tryit.try_output.toPlainText(), text)
         tryit.close()
 
-    def test_buttons_disabled_without_a_dictionary(self):
-        tryit = self._open_tryit_via_menu()
-        self.assertFalse(tryit.encode_button.isEnabled())
-        self.assertFalse(tryit.decode_button.isEnabled())
-        tryit.close()
-        self.window.rebuild_button.click()
-        self._wait_for_rebuild()
-        tryit = self._open_tryit()
-        self.assertTrue(tryit.encode_button.isEnabled())
-        self.assertTrue(tryit.decode_button.isEnabled())
-        tryit.close()
-
-    def test_mismatch_names_the_saved_report(self):
+    def test_decode_pasted_shorthand(self):
+        # T07 (v0.4): shorthand pasted into the input decodes —
+        # the use the old code refused with "Encode something
+        # first."
         self._fill_source()
         self.window.rebuild_button.click()
         self._wait_for_rebuild()
         tryit = self._open_tryit()
-        text = "the quick brown fox"
-        tryit.try_input.setPlainText(text)
-        tryit.encode_button.click()
-        _pump()
-        # Swap in an empty dictionary: the decode can no longer
-        # match, which forces the mismatch path.
-        self.window.dictionary = QwkhndDictionary()
+        dictionary = self.window.dictionary
+        words = sorted(dictionary.word_to_code)[:3]
+        shorthand = " ".join("~" + dictionary.word_to_code[w]
+                            for w in words)
+        tryit.try_input.setPlainText(shorthand)
         tryit.decode_button.click()
         _pump()
-        result = tryit.try_result.text()
-        self.assertIn("MISMATCH", result)
-        self.assertIn("debug-report-", result)
-        self.assertNotIn("Arlo", result)
-        path = result.split("saved at ")[1].rstrip(".")
-        self.assertTrue(os.path.exists(path), path)
+        self.assertEqual(tryit.try_output.toPlainText(),
+                         " ".join(words))
+        self.assertIn("Decoded", tryit.try_result.text())
+        tryit.close()
+
+    def test_decode_plain_text_explains_nothing_changed(self):
+        self._fill_source()
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        tryit = self._open_tryit()
+        tryit.try_input.setPlainText("hello world")
+        tryit.decode_button.click()
+        _pump()
+        self.assertIn("No shorthand codes",
+                      tryit.try_result.text())
+        self.assertEqual(tryit.try_output.toPlainText(),
+                         "hello world")
+        tryit.close()
+
+    def test_decode_unknown_codes_explains(self):
+        self._fill_source()
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        tryit = self._open_tryit()
+        tryit.try_input.setPlainText("~zzz ~qqq")
+        tryit.decode_button.click()
+        _pump()
+        self.assertIn("not in your dictionary",
+                      tryit.try_result.text())
+        self.assertEqual(tryit.try_output.toPlainText(),
+                         "~zzz ~qqq")
+        tryit.close()
+
+    def test_decode_empty_input_says_type_something(self):
+        self._fill_source()
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        tryit = self._open_tryit()
+        tryit.decode_button.click()
+        _pump()
+        self.assertIn("Type something first",
+                      tryit.try_result.text())
+        tryit.close()
+
+    def test_buttons_disabled_without_a_dictionary(self):
+        # T11 (v0.4): without a dictionary the Try it button and
+        # the View menu entry are both disabled — the window
+        # cannot be opened at all — so the no-dictionary state
+        # is asserted on the main window, and the buttons are
+        # checked after a rebuild opens the window for real.
+        self.assertFalse(self.window.tryit_button.isEnabled())
+        self.assertFalse(self.window.tryit_action.isEnabled())
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        self.assertTrue(self.window.tryit_button.isEnabled())
+        self.assertTrue(self.window.tryit_action.isEnabled())
+        tryit = self._open_tryit_via_menu()
+        self.assertTrue(tryit.encode_button.isEnabled())
+        self.assertTrue(tryit.decode_button.isEnabled())
         tryit.close()
 
     def test_tryit_geometry_remembered(self):
+        # T11 (v0.4): the menu entry is disabled without a
+        # dictionary, so the window needs a rebuild first.
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
         tryit = self._open_tryit_via_menu()
         tryit.resize(700, 470)
         QTest.qWait(50)
@@ -1876,11 +2766,500 @@ class TryItWindowTests(GuiTestCase):
             tryit.close()
 
     def test_sample_button_disabled_without_dictionary(self):
-        tryit = self._open_tryit_via_menu()
+        # T11 (v0.4): the Try it window cannot be opened from
+        # the menu without a dictionary, so this constructs the
+        # window directly to check its buttons still disable
+        # themselves in the no-dictionary state.
+        tryit = TryItWindow(self.window, self.window.settings)
         try:
+            tryit.show()
+            QTest.qWait(100)
             self.assertFalse(tryit.sample_button.isEnabled())
+            self.assertFalse(tryit.encode_button.isEnabled())
+            self.assertFalse(tryit.decode_button.isEnabled())
         finally:
             tryit.close()
+
+
+class TryItMessagesTests(GuiTestCase):
+    """T11 (v0.4): the Try it result line explains itself — a
+    longer result names the tilde, and a tiny saving with words
+    the dictionary never saw says what to do about it."""
+
+    def _encode(self, text):
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        tryit = self._open_tryit()
+        tryit.try_input.setPlainText(text)
+        tryit.encode_button.click()
+        result = tryit.try_result.text()
+        tryit.close()
+        return result
+
+    def test_negative_savings_names_the_tilde(self):
+        # F12: "a ~ b" encodes to "a ~~ b" — one longer, not
+        # "-1 saved (-20%)".
+        result = self._encode("a ~ b")
+        self.assertEqual(
+            result,
+            "5 characters in, 6 out. 1 longer. "
+            "A ~ in your text is written as ~~.")
+
+    def test_small_saving_with_uncovered_words_gets_context(self):
+        # F13: "the" is the only word the dictionary knows here,
+        # so the saving is 1 char in 27 — the line says why and
+        # what fixes it.
+        result = self._encode("the zqxwvjklmn pqrstuvwxyz")
+        self.assertIn("1 saved (4%)", result)
+        self.assertIn(
+            "Words not in your dictionary stay as they are. "
+            "Rebuild with files that use them to shrink them.",
+            result)
+
+    def test_small_saving_with_all_words_covered_shows_no_context(self):
+        # The one-letter words cannot be shortened (too short),
+        # and "the" is covered — a rebuild would change nothing,
+        # so no context line appears.
+        result = self._encode("a b c d the")
+        self.assertIn("1 saved (9%)", result)
+        self.assertNotIn("Words not in your dictionary", result)
+
+
+class TryItFileTests(GuiTestCase):
+    """T16 (v0.4): encode and decode whole files from the Try
+    it window. The source is never touched; the result lands
+    next to it with a generated name."""
+
+    def _open_with_dictionary(self):
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        return self._open_tryit()
+
+    def _write(self, name, text):
+        path = os.path.join(self.tmp.name, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return path
+
+    def _pick(self, tryit, button, path):
+        with mock.patch(
+                "qwkhnd.app.QFileDialog.getOpenFileName",
+                return_value=(path, "")):
+            button.click()
+        _pump()
+
+    def test_encode_file_writes_shorthand_next_to_source(self):
+        tryit = self._open_with_dictionary()
+        source = self._write("story.txt",
+                             "the quick brown fox jumps over "
+                             "the lazy dog")
+        self._pick(tryit, tryit.encode_file_button, source)
+        out_path = os.path.join(self.tmp.name,
+                                "story.qwkhnd.txt")
+        self.assertTrue(os.path.exists(out_path))
+        with open(out_path, encoding="utf-8") as fh:
+            encoded = fh.read()
+        self.assertEqual(
+            encoded,
+            self.window.dictionary.encode(
+                "the quick brown fox jumps over the lazy dog"))
+        self.assertIn("story.qwkhnd.txt written next to "
+                      "story.txt", tryit.try_result.text())
+        self.assertIn("saved", tryit.try_result.text())
+        # The source is untouched.
+        with open(source, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(),
+                             "the quick brown fox jumps over "
+                             "the lazy dog")
+
+    def test_decode_file_strips_marker_and_round_trips(self):
+        tryit = self._open_with_dictionary()
+        text = "the quick brown fox " * 20
+        source = self._write("story.txt", text)
+        self._pick(tryit, tryit.encode_file_button, source)
+        encoded_path = os.path.join(self.tmp.name,
+                                    "story.qwkhnd.txt")
+        self._pick(tryit, tryit.decode_file_button, encoded_path)
+        decoded_path = os.path.join(self.tmp.name,
+                                    "story.decoded.txt")
+        self.assertTrue(os.path.exists(decoded_path))
+        with open(decoded_path, encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), text)
+        self.assertIn("story.decoded.txt written next to "
+                      "story.qwkhnd.txt", tryit.try_result.text())
+
+    def test_decode_file_without_marker_gets_decoded_name(self):
+        tryit = self._open_with_dictionary()
+        source = self._write("plain.txt", "the quick brown fox")
+        self._pick(tryit, tryit.decode_file_button, source)
+        self.assertTrue(os.path.exists(
+            os.path.join(self.tmp.name, "plain.decoded.txt")))
+
+    def test_file_round_trip_byte_for_byte_at_100k(self):
+        tryit = self._open_with_dictionary()
+        text = ("the quick brown fox jumps over the lazy dog "
+                "and runs through the dictionary of words "
+                "to find the meaning of shorthand. ") * 900
+        self.assertGreater(len(text), 100000)
+        source = self._write("big.txt", text)
+        self._pick(tryit, tryit.encode_file_button, source)
+        encoded_path = os.path.join(self.tmp.name,
+                                    "big.qwkhnd.txt")
+        self._pick(tryit, tryit.decode_file_button, encoded_path)
+        with open(os.path.join(self.tmp.name, "big.decoded.txt"),
+                  encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), text)
+
+    def test_file_buttons_disabled_without_dictionary(self):
+        tryit = TryItWindow(self.window, self.window.settings)
+        try:
+            tryit.show()
+            QTest.qWait(100)
+            self.assertFalse(tryit.encode_file_button.isEnabled())
+            self.assertFalse(tryit.decode_file_button.isEnabled())
+        finally:
+            tryit.close()
+
+    def test_non_text_file_shows_a_plain_notice(self):
+        tryit = self._open_with_dictionary()
+        path = os.path.join(self.tmp.name, "binary.bin")
+        with open(path, "wb") as fh:
+            fh.write(b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4)
+        self._pick(tryit, tryit.encode_file_button, path)
+        self.assertEqual(
+            tryit.try_result.text(),
+            "Could not read that file as plain text. "
+            "Pick a .txt or .md file.")
+        self.assertFalse(os.path.exists(
+            os.path.join(self.tmp.name, "binary.qwkhnd.bin")))
+
+
+class ImportTests(GuiTestCase):
+    """T17 (v0.4): import a dictionary from a JSON file. A bad
+    file leaves everything alone; a good one replaces the
+    dictionary and rotates the old one to previous."""
+
+    def _export_json(self, name):
+        path = os.path.join(self.tmp.name, name)
+        with mock.patch(
+                "qwkhnd.app.QFileDialog.getSaveFileName",
+                return_value=(path, "")):
+            self.window.export_json_button.click()
+        _pump()
+        return path
+
+    def _import(self, window, path):
+        with mock.patch(
+                "qwkhnd.app.QFileDialog.getOpenFileName",
+                return_value=(path, "")):
+            window.import_action.trigger()
+        _pump()
+
+    def test_import_action_enabled_without_dictionary(self):
+        self.assertTrue(self.window.import_action.isEnabled())
+
+    def test_export_then_import_into_a_fresh_window(self):
+        self._fill_source()
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        exported = self._export_json("exported.json")
+        codes = len(self.window.dictionary)
+        second_dir = os.path.join(self.tmp.name, "data2")
+        second = MainWindow(
+            data_dir=second_dir,
+            settings_path=os.path.join(self.tmp.name,
+                                       "settings2.ini"))
+        second.show()
+        _pump()
+        try:
+            self._import(second, exported)
+            self.assertEqual(len(second.dictionary), codes)
+            self.assertIn("the", second.dictionary.word_to_code)
+            self.assertEqual(second.codes_value.text(),
+                             "%d" % codes)
+            self.assertEqual(second.hero_value.text(), "-")
+            self.assertIn("Imported dictionary",
+                          second.hero_sub.text())
+            self.assertIn("Dictionary imported",
+                          second.statusBar().currentMessage())
+            # The import is saved, so it loads on restart.
+            self.assertTrue(os.path.exists(second.dict_path))
+        finally:
+            second.close()
+            second.deleteLater()
+            _pump()
+        third = MainWindow(
+            data_dir=second_dir,
+            settings_path=os.path.join(self.tmp.name,
+                                       "settings2.ini"))
+        third.show()
+        _pump()
+        try:
+            self.assertEqual(len(third.dictionary), codes)
+        finally:
+            third.close()
+            third.deleteLater()
+            _pump()
+
+    def test_corrupt_import_leaves_everything_alone(self):
+        self._fill_source()
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        before = dict(self.window.dictionary.word_to_code)
+        with open(self.window.dict_path, "rb") as fh:
+            saved = fh.read()
+        bad_json = os.path.join(self.tmp.name, "bad.json")
+        with open(bad_json, "w", encoding="utf-8") as fh:
+            fh.write("this is not json at all")
+        self._import(self.window, bad_json)
+        self.assertEqual(self.window.dictionary.word_to_code,
+                         before)
+        self.assertIn("does not look like JSON",
+                      self.window.notice_label.text())
+        bad_shape = os.path.join(self.tmp.name, "shape.json")
+        with open(bad_shape, "w", encoding="utf-8") as fh:
+            fh.write('{"entries": "not a list"}')
+        self._import(self.window, bad_shape)
+        self.assertEqual(self.window.dictionary.word_to_code,
+                         before)
+        self.assertIn("Could not import that file",
+                      self.window.notice_label.text())
+        with open(self.window.dict_path, "rb") as fh:
+            self.assertEqual(fh.read(), saved)
+        self.assertFalse(
+            os.path.exists(self.window.previous_dict_path))
+
+    def test_empty_import_refused(self):
+        self._fill_source()
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        before = dict(self.window.dictionary.word_to_code)
+        empty = os.path.join(self.tmp.name, "empty.json")
+        with open(empty, "w", encoding="utf-8") as fh:
+            fh.write('{"marker": "~", "version": "0.4", '
+                     '"entries": []}')
+        self._import(self.window, empty)
+        self.assertEqual(self.window.dictionary.word_to_code,
+                         before)
+        self.assertIn("holds no codes",
+                      self.window.notice_label.text())
+
+    def test_import_rotates_previous_and_restore_works(self):
+        folder = self._source_folder()
+        with open(os.path.join(folder, "a.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("the quick brown fox " * 10)
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        exported = self._export_json("first.json")
+        with open(os.path.join(folder, "a.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("lazy dog sleeps soundly " * 10)
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        self.assertIn("lazy", self.window.dictionary.word_to_code)
+        self._import(self.window, exported)
+        self.assertIn("quick",
+                      self.window.dictionary.word_to_code)
+        self.assertNotIn("lazy",
+                         self.window.dictionary.word_to_code)
+        # The pre-import dictionary is now the previous one.
+        self.window.restore_action.trigger()
+        _pump()
+        self.assertIn("lazy", self.window.dictionary.word_to_code)
+
+
+class UncoveredTests(GuiTestCase):
+    """T18 (v0.4): the words that got no code — a link under
+    the Codes tile, a tab with the list, and the reason for
+    each word."""
+
+    def test_link_tab_and_list_after_rebuild(self):
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        # T20 (v0.4): the rewritten samples have 47 words
+        # without a code (184 codes, 695 words, 231 different).
+        self.assertEqual(len(self.window._uncovered_words), 47)
+        self.assertTrue(self.window.uncovered_link.isVisible())
+        self.assertEqual(self.window.uncovered_link.text(),
+                         "47 words have no code")
+        index = self.window.tabs.indexOf(
+            self.window._uncovered_tab_widget)
+        self.assertEqual(self.window.tabs.tabText(index),
+                         "Words without codes (47)")
+        self.assertEqual(self.window.uncovered_list.count(), 47)
+        for row in range(self.window.uncovered_list.count()):
+            text = self.window.uncovered_list.item(row).text()
+            self.assertTrue(
+                text.endswith("too short to shrink")
+                or text.endswith(
+                    "the next code would not make it shorter"),
+                text)
+        self.window.uncovered_link.click()
+        _pump()
+        self.assertEqual(self.window.tabs.currentWidget(),
+                         self.window._uncovered_tab_widget)
+
+    def test_uncovered_survives_restart(self):
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        self.window.close()
+        _pump()
+        second = MainWindow(data_dir=self.data_dir,
+                            settings_path=self.settings_path)
+        second.show()
+        _pump()
+        try:
+            self.assertEqual(len(second._uncovered_words), 47)
+            self.assertTrue(second.uncovered_link.isVisible())
+            self.assertEqual(second.uncovered_list.count(), 47)
+        finally:
+            second.close()
+            second.deleteLater()
+            _pump()
+
+    def test_no_result_rebuild_keeps_the_list(self):
+        # T01: a rebuild that finds nothing leaves the list
+        # (and the dictionary) untouched.
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        empty = os.path.join(self.tmp.name, "empty")
+        os.makedirs(empty)
+        self.window.folder_edit.setText(empty)
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        self.assertEqual(len(self.window._uncovered_words), 47)
+        self.assertTrue(self.window.uncovered_link.isVisible())
+        self.assertEqual(self.window.uncovered_list.count(), 47)
+
+    def test_all_covered_hides_the_link(self):
+        folder = os.path.join(self.tmp.name, "oneword")
+        os.makedirs(folder)
+        with open(os.path.join(folder, "a.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("dictionary " * 20)
+        self.window.folder_edit.setText(folder)
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        self.assertEqual(self.window._uncovered_words, [])
+        self.assertFalse(self.window.uncovered_link.isVisible())
+        index = self.window.tabs.indexOf(
+            self.window._uncovered_tab_widget)
+        self.assertEqual(self.window.tabs.tabText(index),
+                         "Words without codes")
+        self.assertEqual(self.window.uncovered_list.count(), 0)
+
+
+class StaleHintTests(GuiTestCase):
+    """T19 (v0.4): the gold hint under the folder line when the
+    dictionary came from a different folder than the one in the
+    field."""
+
+    def _other_folder(self):
+        other = os.path.join(self.tmp.name, "other")
+        os.makedirs(other, exist_ok=True)
+        return other
+
+    def test_hint_hidden_after_rebuild(self):
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        self.assertFalse(self.window.stale_label.isVisible())
+
+    def test_hint_shows_when_folder_changes(self):
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        other = self._other_folder()
+        self.window.folder_edit.setText(other)
+        _pump()
+        self.assertTrue(self.window.stale_label.isVisible())
+        self.assertEqual(
+            self.window.stale_label.text(),
+            "Dictionary is from a different folder. Press "
+            "Rebuild to refresh it.")
+        self.window.folder_edit.setText(self.window.source_dir)
+        _pump()
+        self.assertFalse(self.window.stale_label.isVisible())
+
+    def test_hint_clears_after_rebuild_from_new_folder(self):
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        other = self._other_folder()
+        with open(os.path.join(other, "a.txt"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("the quick brown fox " * 10)
+        self.window.folder_edit.setText(other)
+        _pump()
+        self.assertTrue(self.window.stale_label.isVisible())
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        self.assertFalse(self.window.stale_label.isVisible())
+
+    def test_hint_hidden_after_restart(self):
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        self.window.close()
+        _pump()
+        second = MainWindow(data_dir=self.data_dir,
+                            settings_path=self.settings_path)
+        second.show()
+        _pump()
+        try:
+            self.assertFalse(second.stale_label.isVisible())
+            other = self._other_folder()
+            second.folder_edit.setText(other)
+            _pump()
+            self.assertTrue(second.stale_label.isVisible())
+        finally:
+            second.close()
+            second.deleteLater()
+            _pump()
+
+    def test_import_never_shows_hint(self):
+        self.window.rebuild_button.click()
+        self._wait_for_rebuild()
+        exported = os.path.join(self.tmp.name, "exported.json")
+        with mock.patch(
+                "qwkhnd.app.QFileDialog.getSaveFileName",
+                return_value=(exported, "")):
+            self.window.export_json_button.click()
+        _pump()
+        with mock.patch(
+                "qwkhnd.app.QFileDialog.getOpenFileName",
+                return_value=(exported, "")):
+            self.window.import_action.trigger()
+        _pump()
+        self.assertIsNone(self.window._dict_source_folder)
+        self.window.folder_edit.setText(self._other_folder())
+        _pump()
+        self.assertFalse(self.window.stale_label.isVisible())
+
+    def test_old_save_without_source_assumes_current_folder(self):
+        # A v0.3 save has no source_folder key: loading it
+        # assumes the current folder, so no stale hint appears.
+        data_dir = os.path.join(self.tmp.name, "data-old")
+        os.makedirs(os.path.join(data_dir, "Source Material"))
+        dictionary, _ = build_from_folder(
+            self.window.source_dir)
+        data = dictionary.to_json_dict()
+        data["build"] = {"files_read": 1, "total_words": 10,
+                         "unique_words": 5}
+        with open(os.path.join(data_dir,
+                               "qwkhnd-dictionary.json"),
+                  "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        window = MainWindow(
+            data_dir=data_dir,
+            settings_path=os.path.join(self.tmp.name,
+                                       "settings-old.ini"))
+        window.show()
+        _pump()
+        try:
+            self.assertTrue(window.dictionary)
+            self.assertFalse(window.stale_label.isVisible())
+        finally:
+            window.close()
+            window.deleteLater()
+            _pump()
 
 
 class CopyTests(GuiTestCase):
@@ -1896,7 +3275,7 @@ class CopyTests(GuiTestCase):
                       hints[0].text())
 
     def test_sample_tile_explains_itself(self):
-        self.assertIn("100 characters",
+        self.assertIn("start of your text",
                       self.window.sample_caption.text())
         self.assertIn("before and after",
                       self.window.sample_caption.text())

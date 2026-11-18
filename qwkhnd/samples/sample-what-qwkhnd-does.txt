@@ -1,11 +1,11 @@
 What Qwkhnd does
 
-Qwkhnd is a small program that builds a shorthand dictionary from your own words. You drop files into a folder and press Rebuild. Qwkhnd reads every file it can and counts how often each word appears. The words you use the most get the shortest codes. The most common word gets the code a, the next most common gets b, and the codes grow longer from there.
+Qwkhnd is a small program that builds a shorthand dictionary from your own words. You drop files into a folder and press Rebuild. Qwkhnd reads every file it can and counts how often each word appears. The words that save the most text get the shortest codes: how often a word appears, times how many characters its code saves. A long word you use often beats a short word you use more, because each use saves more text.
 
-When you write a word in shorthand, you write a tilde and then its code. If the word the has the code a, then the is written as ~a. Short words stay as they are, because a code would not make them any shorter. Qwkhnd never makes your text longer. That is the whole point of the program.
+When you write a word in shorthand, you write a tilde and then its code. If the word dictionary has the code a, then dictionary is written as ~a. Short words stay as they are, because a code would not make them any shorter. Qwkhnd never makes your text longer, except for a literal ~, which is written as ~~. That is the whole point of the program.
 
 The dictionary belongs to you. It comes from your files, your books, and your notes. Nothing leaves your computer. Qwkhnd works offline, and it never asks for an account or a password.
 
-When you add new files, press Rebuild again. The dictionary is built fresh from everything in the folder. The old dictionary stays in place until the new one is ready, so you never lose your work.
+When you add new files, press Rebuild again. The dictionary is built fresh from everything in the folder. The old dictionary stays in place until a rebuild finishes, and if a rebuild finds nothing to build from, it stays put.
 
 This file is a sample. You can delete it, and Qwkhnd will not bring it back. Add your own files, and the dictionary will be yours.

@@ -387,15 +387,17 @@ class DebugLogger:
                 sections.append("  %s: %s" % (key, settings[key]))
         else:
             sections.append("  (none registered)")
-        sections.append("")
-        sections.append("== Services ==")
         services = context.get("services") or {}
         if services:
+            # T21 (v0.4): the Services section only appears when
+            # a service is registered — Qwkhnd registers none,
+            # so the old code printed an empty section with
+            # "(none registered)" in every report (F33).
+            sections.append("")
+            sections.append("== Services ==")
             for name in sorted(services):
                 sections.append("  %s: %s"
                                 % (name, scrub_text(services[name])))
-        else:
-            sections.append("  (none registered)")
         sections.append("")
         sections.append("== Recent actions (last %d) =="
                         % len(self._ring.records))

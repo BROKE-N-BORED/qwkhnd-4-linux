@@ -213,11 +213,34 @@ def scan_folder(folder):
 
 
 def _short_error(exc):
-    """One line of an exception, capped so the UI stays readable."""
+    """One line of an exception, capped so the log stays readable.
+    For the LOG only now (T09, v0.4): the UI gets plain words
+    from _plain_os_error, never an exception string."""
     text = str(exc).replace("\n", " ").strip()
     if len(text) > 120:
         text = text[:117] + "..."
     return text or exc.__class__.__name__
+
+
+def _plain_os_error(exc):
+    """T09 (v0.4): a file-read failure in plain words, with no
+    exception text in it. The old code showed "[Errno 13]
+    Permission denied: '/path'" in the Skipped list; the user
+    cannot act on an errno, and the path is already in the list.
+    The technical detail still goes to the log (see
+    _log_read_error)."""
+    if isinstance(exc, PermissionError):
+        return "could not read the file (permission denied)"
+    if isinstance(exc, FileNotFoundError):
+        return "could not read the file (the file was moved or deleted)"
+    return "could not read the file (the file could not be opened)"
+
+
+def _log_read_error(log, path, exc):
+    """T09 (v0.4): the technical detail behind a plain-words skip
+    reason, for the log only."""
+    if log is not None:
+        log.info("could not read %s: %s", path, _short_error(exc))
 
 
 def _looks_binary(data):
@@ -231,19 +254,21 @@ def _looks_binary(data):
     return bad / len(sample) > 0.30
 
 
-def extract_text(path, cancelled=None, file_progress=None):
+def extract_text(path, cancelled=None, file_progress=None, log=None):
     """Read a file as text. Returns (True, text) or (False, reason).
 
     Reads in chunks (T08): cancelled() is checked per chunk and
     file_progress(fraction) reports the read, so a big file can
     be stopped part-way through. Raises Cancelled when cancelled.
     There is no size cap (Joshua's decision): a big file is read
-    in full unless cancelled.
+    in full unless cancelled. A read failure returns a plain-words
+    reason (T09); the technical detail goes to log when given.
     """
     try:
         size = os.path.getsize(path)
     except OSError as exc:
-        return False, "could not read the file (%s)" % _short_error(exc)
+        _log_read_error(log, path, exc)
+        return False, _plain_os_error(exc)
     chunks = []
     read = 0
     try:
@@ -259,7 +284,8 @@ def extract_text(path, cancelled=None, file_progress=None):
                 if file_progress is not None and size:
                     file_progress(read / size)
     except OSError as exc:
-        return False, "could not read the file (%s)" % _short_error(exc)
+        _log_read_error(log, path, exc)
+        return False, _plain_os_error(exc)
     data = b"".join(chunks)
     if not data:
         return True, ""
@@ -304,18 +330,27 @@ def _detect_utf16(data):
     return None
 
 
-def extract_pdf(path, cancelled=None, file_progress=None):
+def extract_pdf(path, cancelled=None, file_progress=None, log=None):
     """Read a PDF's text layer via pypdf. cancelled() is checked
     per page and file_progress(fraction) reports the read (T08).
-    Raises Cancelled when cancelled."""
+    Raises Cancelled when cancelled. A file that will not open
+    returns a plain-words reason (T09); the technical detail
+    goes to log when given."""
     try:
         from pypdf import PdfReader
     except ImportError:
         return False, "pypdf is not installed, so PDFs cannot be read"
     try:
         reader = PdfReader(path)
+    except OSError as exc:
+        # A permission or vanished file is a read failure, not a
+        # damaged PDF: say that, not "looks damaged".
+        _log_read_error(log, path, exc)
+        return False, _plain_os_error(exc)
     except Exception as exc:  # pypdf raises its own error types
-        return False, "could not open as a PDF (%s)" % _short_error(exc)
+        _log_read_error(log, path, exc)
+        return False, ("could not open as a PDF "
+                       "(the file looks damaged)")
     if reader.is_encrypted:
         try:
             reader.decrypt("")
@@ -352,10 +387,11 @@ def _word_xml_to_text(xml_bytes):
     return "\n".join(paragraphs)
 
 
-def extract_docx(path):
+def extract_docx(path, log=None):
     """Read a .docx with the standard library (zip + XML): the
     main text plus headers, footers, footnotes and endnotes
-    (T21)."""
+    (T21). A read failure returns a plain-words reason (T09);
+    the technical detail goes to log when given."""
     try:
         with zipfile.ZipFile(path) as zf:
             names = zf.namelist()
@@ -385,7 +421,8 @@ def extract_docx(path):
     except zipfile.BadZipFile:
         return False, "not a valid .docx file (damaged or not a Word file)"
     except OSError as exc:
-        return False, "could not read the file (%s)" % _short_error(exc)
+        _log_read_error(log, path, exc)
+        return False, _plain_os_error(exc)
     text = "\n".join(t for t in texts if t)
     if not text.strip():
         if document_bad:
@@ -394,15 +431,18 @@ def extract_docx(path):
     return True, text
 
 
-def extract_epub(path):
+def extract_epub(path, log=None):
     """Read an EPUB's chapters in spine order (T12). Returns
-    (True, text) or (False, reason)."""
+    (True, text) or (False, reason). A read failure returns a
+    plain-words reason (T09); the technical detail goes to log
+    when given."""
     try:
         zf = zipfile.ZipFile(path)
     except zipfile.BadZipFile:
         return False, "not a valid EPUB file (damaged or not an EPUB)"
     except OSError as exc:
-        return False, "could not read the file (%s)" % _short_error(exc)
+        _log_read_error(log, path, exc)
+        return False, _plain_os_error(exc)
     with zf:
         try:
             container = zf.read("META-INF/container.xml")
@@ -469,29 +509,32 @@ def extract_epub(path):
     return True, text
 
 
-def extract_file(path, cancelled=None, file_progress=None):
+def extract_file(path, cancelled=None, file_progress=None, log=None):
     """Read one file. Returns (True, text) or (False, reason).
     cancelled and file_progress are passed through to the text
-    and PDF readers (T08); Cancelled is raised when cancelled."""
+    and PDF readers (T08); Cancelled is raised when cancelled.
+    log is passed through to every reader (T09): a read failure
+    returns plain words, and the technical detail goes to the
+    log."""
     ext = os.path.splitext(path)[1].lower()
     if ext == ".pdf":
         return extract_pdf(path, cancelled=cancelled,
-                           file_progress=file_progress)
+                           file_progress=file_progress, log=log)
     if ext == ".docx":
-        return extract_docx(path)
+        return extract_docx(path, log=log)
     if ext == ".epub":
-        return extract_epub(path)
+        return extract_epub(path, log=log)
     if ext in (".html", ".htm"):
         # T13: strip the markup; the text underneath is what counts.
         ok, text = extract_text(path, cancelled=cancelled,
-                                file_progress=file_progress)
+                                file_progress=file_progress, log=log)
         if not ok:
             return False, text
         return True, strip_html(text)
     if ext == ".md":
         # T13: drop link URLs and code, keep the readable words.
         ok, text = extract_text(path, cancelled=cancelled,
-                                file_progress=file_progress)
+                                file_progress=file_progress, log=log)
         if not ok:
             return False, text
         return True, strip_markdown(text)
@@ -502,4 +545,4 @@ def extract_file(path, cancelled=None, file_progress=None):
     if ext in BINARY_EXTENSIONS:
         return False, BINARY_REASON
     return extract_text(path, cancelled=cancelled,
-                        file_progress=file_progress)
+                        file_progress=file_progress, log=log)

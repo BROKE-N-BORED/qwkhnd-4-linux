@@ -46,14 +46,17 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QFrame, QGraphicsOpacityEffect,
     QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidget,
-    QMainWindow, QMessageBox, QPlainTextEdit, QProgressBar,
+    QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar,
     QPushButton, QScrollArea, QSizePolicy, QStatusBar, QTabWidget,
     QTableView, QTextEdit, QVBoxLayout, QWidget,
 )
 
 from . import APP_ID, APP_NAME, VERSION
 from .debug_log import DebugLogger
-from .engine import QwkhndDictionary, atomic_write_text, build_from_folder
+from .engine import (MARKER, MIN_WORD_LEN, BuildReport,
+                      QwkhndDictionary, SAMPLE_CHARS,
+                      atomic_write_text, build_from_folder,
+                      iter_tokens)
 
 TOP_SHOWN = 100
 ORGANISATION = "BrokeNBored"
@@ -226,7 +229,7 @@ QTableView:focus {
 QHeaderView::section {
     background-color: #1a2c3e;
     color: #b8c4d0;
-    padding: 4px;
+    padding: 2px;
     border: none;
     border-bottom: 1px solid #35506b;
 }
@@ -356,8 +359,8 @@ def help_sections():
    Cancel to stop it. The old dictionary stays in place until a
    rebuild finishes.
 3. The words that save the most text get the shortest codes.
-   Try it out in the Try it window (View menu), and export the
-   dictionary as JSON or plain text.
+   Try it out in the Try it window (the Try it button, or the
+   View menu), and export the dictionary as JSON or plain text.
 
 One decoding rule: a code is the ~ sign plus all the letters
 right after it, with no space. So ~brown is read as one code,
@@ -379,6 +382,9 @@ Skipped files tab, with its reason):
 - Archives, programs and other binary files: no readable text.
 - Old .doc/.xls/.ppt files: save them as .docx to use them.
 - Hidden files and folders, and scanned PDFs with no text layer.
+- Symbolic links to files: Qwkhnd never follows them.
+- Qwkhnd's own dictionary and log files: they are not source
+  material, so they are skipped.
 """ % {"version": VERSION}),
         ("Keyboard shortcuts",
          """Keyboard shortcuts: Ctrl+R rebuilds the dictionary, Ctrl+E opens
@@ -433,8 +439,9 @@ def quick_start_text():
 2. Press the Rebuild dictionary button. %(name)s reads your files
    and builds the dictionary. The old dictionary stays until the
    new one is ready.
-3. Open the Try it window from the View menu and encode some
-   text. Then export the dictionary as JSON or plain text.
+3. Open the Try it window from the Try it button or the View
+   menu and encode some text. Then export the dictionary as
+   JSON or plain text.
 
 For the full guide, open How to Use from the Help menu.
 """ % {"name": APP_NAME}
@@ -549,6 +556,11 @@ class DictionaryTableModel(QAbstractTableModel):
         super().__init__(parent)
         self._entries = []
         self._row_by_word = {}
+        # T10 (v0.4): the user's sort, or -1 for the default
+        # most-frequent-first order. A sort survives rebuilds
+        # and searches: set_entries re-applies it (U28).
+        self._sort_column = -1
+        self._sort_order = Qt.AscendingOrder
 
     def set_entries(self, entries):
         self.beginResetModel()
@@ -556,6 +568,55 @@ class DictionaryTableModel(QAbstractTableModel):
         self._row_by_word = {word: row for row, (word, _, _)
                              in enumerate(self._entries)}
         self.endResetModel()
+        self._apply_sort()
+
+    def sort(self, column, order=Qt.AscendingOrder):
+        """T10 (v0.4): header-click sorting. Called by the view
+        when a header is clicked; the view toggles the order on
+        a second click. The sort persists until the user picks
+        another column — there is no click back to the default
+        order, which is the standard table behaviour."""
+        if column < 0 or column >= self.columnCount():
+            return
+        self._sort_column = column
+        self._sort_order = order
+        self._apply_sort()
+
+    def _apply_sort(self):
+        """Reorder the entries by the user's sort, keeping the
+        selection on its row (the persistent indexes are remapped
+        by entry, so the selected word stays selected)."""
+        if self._sort_column < 0:
+            return
+        old = list(self._entries)
+        self.layoutAboutToBeChanged.emit()
+        reverse = self._sort_order == Qt.DescendingOrder
+        self._entries.sort(key=lambda entry: entry[self._sort_column],
+                           reverse=reverse)
+        new_row = {id(entry): row
+                   for row, entry in enumerate(self._entries)}
+        for index in self.persistentIndexList():
+            if index.isValid():
+                entry = old[index.row()]
+                self.changePersistentIndex(
+                    index,
+                    self.index(new_row[id(entry)], index.column()))
+        self._row_by_word = {word: row for row, (word, _, _)
+                             in enumerate(self._entries)}
+        self.layoutChanged.emit()
+
+    def sort_description(self):
+        """The column the table is sorted by ("Word", "Code",
+        "Times used"), or None for the default most-frequent-first
+        order. The count label shows it (T10)."""
+        if self._sort_column < 0:
+            return None
+        return self.HEADERS[self._sort_column]
+
+    def entry_at(self, row):
+        """The (word, code, count) tuple on one row, for the
+        copy menu (T10)."""
+        return self._entries[row]
 
     def rowCount(self, parent=None):
         if parent is not None and parent.isValid():
@@ -684,8 +745,9 @@ class TryItWindow(QMainWindow):
 
         central = QWidget(self)
         layout = QVBoxLayout(central)
-        layout.addWidget(QLabel("Type or paste some text, then "
-                                "encode it:"))
+        layout.addWidget(QLabel(
+            "Type or paste text to encode, or shorthand to "
+            "decode:"))
         self.try_input = QPlainTextEdit()
         self.try_input.setPlaceholderText(
             "Type something here after a rebuild...")
@@ -707,7 +769,7 @@ class TryItWindow(QMainWindow):
         self.encode_button = QPushButton("Encode")
         self.encode_button.clicked.connect(self._try_encode)
         row.addWidget(self.encode_button)
-        self.decode_button = QPushButton("Decode it back")
+        self.decode_button = QPushButton("Decode")
         self.decode_button.clicked.connect(self._try_decode)
         row.addWidget(self.decode_button)
         self.copy_button = QPushButton("Copy result")
@@ -718,12 +780,34 @@ class TryItWindow(QMainWindow):
         row.addWidget(self.copy_button)
         row.addStretch(1)
         layout.addLayout(row)
+        # T16 (v0.4): whole files, not just pasted text. The
+        # result is saved next to the file picked, never over it.
+        file_row = QHBoxLayout()
+        self.encode_file_button = QPushButton("Encode a file...")
+        self.encode_file_button.setToolTip(
+            "Encode a whole text file and save the shorthand "
+            "next to it")
+        self.encode_file_button.clicked.connect(
+            lambda: self._try_file("encode"))
+        file_row.addWidget(self.encode_file_button)
+        self.decode_file_button = QPushButton("Decode a file...")
+        self.decode_file_button.setToolTip(
+            "Decode a whole shorthand file back to plain words "
+            "and save it next to it")
+        self.decode_file_button.clicked.connect(
+            lambda: self._try_file("decode"))
+        file_row.addWidget(self.decode_file_button)
+        file_row.addStretch(1)
+        layout.addLayout(file_row)
+        layout.addWidget(QLabel(
+            "The result is saved next to the file you pick."))
         self.try_output = QPlainTextEdit()
         self.try_output.setReadOnly(True)
         layout.addWidget(self.try_output)
         layout.addWidget(QLabel(
-            "The result appears here. Encode turns text into "
-            "shorthand. Decode turns it back."))
+            "The result appears here. Encode turns the text above "
+            "into shorthand. Decode turns shorthand above back "
+            "into plain words."))
         self.try_result = QLabel("")
         self.try_result.setWordWrap(True)
         layout.addWidget(self.try_result)
@@ -741,6 +825,8 @@ class TryItWindow(QMainWindow):
         have_dict = bool(self.main_window.dictionary)
         self.encode_button.setEnabled(have_dict)
         self.decode_button.setEnabled(have_dict)
+        self.encode_file_button.setEnabled(have_dict)
+        self.decode_file_button.setEnabled(have_dict)
         self.sample_button.setEnabled(have_dict)
         self.copy_button.setEnabled(
             bool(self.try_output.toPlainText()))
@@ -762,15 +848,118 @@ class TryItWindow(QMainWindow):
         encoded = dictionary.encode(text)
         self.try_output.setPlainText(encoded)
         _, _, saved, pct = dictionary.savings(text)
-        self.try_result.setText(
-            "%d characters in, %d out. %d saved (%.0f%%)"
-            % (len(text), len(encoded), saved, pct))
+        if saved < 0:
+            # T11 (v0.4): encoding only lengthens text through
+            # "~" escaping — say so plainly instead of "-1 saved
+            # (-20%)", which reads like a bug.
+            if "~" in text:
+                reason = " A ~ in your text is written as ~~."
+            else:
+                reason = ""
+            self.try_result.setText(
+                "%d characters in, %d out. %d longer.%s"
+                % (len(text), len(encoded), -saved, reason))
+        else:
+            message = ("%d characters in, %d out. %d saved (%.0f%%)"
+                       % (len(text), len(encoded), saved, pct))
+            if pct < 10 and self._has_uncovered_words(text):
+                # T11 (v0.4): a tiny saving with words the
+                # dictionary never saw gets one line of context.
+                message += (" Words not in your dictionary stay "
+                            "as they are. Rebuild with files that "
+                            "use them to shrink them.")
+            self.try_result.setText(message)
         self.main_window.log.action(
             "try-it encode: %d chars -> %d"
             % (len(text), len(encoded)))
         self.main_window._tried_it = True
+        self.main_window.settings.setValue("tried_it", True)
         self.main_window._refresh_checklist()
         self.refresh_buttons()
+
+    def _file_output_path(self, path, direction):
+        """T16 (v0.4): encode writes name.qwkhnd.txt; decode
+        strips a .qwkhnd marker if present, then writes
+        name.decoded.txt. The source is never overwritten."""
+        folder = os.path.dirname(path)
+        base, ext = os.path.splitext(os.path.basename(path))
+        ext = ext or ".txt"
+        if direction == "encode":
+            return os.path.join(folder, base + ".qwkhnd" + ext)
+        if base.endswith(".qwkhnd"):
+            base = base[:-len(".qwkhnd")]
+        return os.path.join(folder, base + ".decoded" + ext)
+
+    def _try_file(self, direction):
+        """T16 (v0.4): encode or decode a whole file. The
+        output is written next to the source with a generated
+        name, so the source is never touched; a previous
+        generated output is overwritten without asking — it is
+        a generated file, not the user's work."""
+        if direction == "encode":
+            title = "Pick a text file to encode"
+        else:
+            title = "Pick a shorthand file to decode"
+        path, _ = QFileDialog.getOpenFileName(
+            self, title, "",
+            "Text files (*.txt *.md);;All files (*)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+        except (OSError, UnicodeDecodeError):
+            self.try_result.setText(
+                "Could not read that file as plain text. "
+                "Pick a .txt or .md file.")
+            return
+        dictionary = self.main_window.dictionary
+        if direction == "encode":
+            result = dictionary.encode(text)
+        else:
+            result = dictionary.decode(text)
+        out_path = self._file_output_path(path, direction)
+        try:
+            atomic_write_text(out_path, result)
+        except OSError:
+            self.try_result.setText(
+                "Could not write %s. Check the folder is "
+                "writable and try again."
+                % os.path.basename(out_path))
+            return
+        if direction == "encode":
+            _, _, saved, pct = dictionary.savings(text)
+            if saved < 0:
+                detail = "%d longer" % -saved
+            else:
+                detail = "%d saved (%.0f%%)" % (saved, pct)
+            self.try_result.setText(
+                "%s written next to %s. %d characters in, "
+                "%d out. %s."
+                % (os.path.basename(out_path),
+                   os.path.basename(path),
+                   len(text), len(result), detail))
+        else:
+            self.try_result.setText(
+                "%s written next to %s. %d characters in, "
+                "%d out."
+                % (os.path.basename(out_path),
+                   os.path.basename(path),
+                   len(text), len(result)))
+        self.main_window.log.action(
+            "try-it %s file: %s -> %s" % (direction, path, out_path))
+        self.refresh_buttons()
+
+    def _has_uncovered_words(self, text):
+        """T11 (v0.4): True when the text holds a word long
+        enough to shorten (3+ letters) that the dictionary has
+        no code for — the words a rebuild could shrink."""
+        dictionary = self.main_window.dictionary
+        for is_word, token in iter_tokens(text):
+            if is_word and len(token) >= MIN_WORD_LEN \
+                    and token not in dictionary.word_to_code:
+                return True
+        return False
 
     def _try_sample(self):
         # T17: fill in a sentence that encodes shorter. The
@@ -809,28 +998,123 @@ class TryItWindow(QMainWindow):
             1200, lambda: self.copy_button.setText("Copy result"))
 
     def _try_decode(self):
-        text = self.try_output.toPlainText()
+        # T07 (v0.4): Decode reads the input box, the only editable
+        # one — Encode and Decode are mirrors now. The old code
+        # decoded the output box, so shorthand pasted in could
+        # never be decoded at all (F08). There is no round-trip
+        # check here any more: with no expected text to compare
+        # against, the engine suite is what guards the round-trip.
+        text = self.try_input.toPlainText()
         if not text:
-            self.try_result.setText("Encode something first.")
+            self.try_result.setText("Type something first.")
             return
         dictionary = self.main_window.dictionary
         decoded = dictionary.decode(text)
         self.try_output.setPlainText(decoded)
-        if decoded == self.try_input.toPlainText():
+        if MARKER not in text:
             self.try_result.setText(
-                "Round-trip: exact. Decoded text matches what "
-                "you typed, character for character.")
+                "No shorthand codes in that text, so nothing "
+                "changed.")
+        elif decoded == text:
+            self.try_result.setText(
+                "Those codes are not in your dictionary, so "
+                "nothing changed.")
         else:
-            # T13: there is no send mechanism, so the report is
-            # generated here and the message names where it is.
-            path = self.main_window.log.generate_report()
             self.try_result.setText(
-                "Round-trip MISMATCH. That should never happen. "
-                "A debug report was saved at %s." % path)
-            self.main_window.log.error("try-it round-trip mismatch")
+                "Decoded: %d characters in, %d out."
+                % (len(text), len(decoded)))
         self.main_window.log.action("try-it decode: %d chars"
                                     % len(text))
         self.refresh_buttons()
+
+
+def _trim_sample(text, limit):
+    """T08 (v0.4): trim a sample for display at a word boundary
+    within limit characters, with an ellipsis when truncated.
+    The old code sliced at exactly the limit, which could cut a
+    code in half and show a lone "~" that means nothing. A cut
+    that still ends on a "~" has it stripped, and a cut with no
+    word boundary keeps the slice (a single long word has
+    nowhere better to break). A string exactly at the limit
+    is trimmed too: the stored sample is a 100-character slice
+    of a longer text, so a string that fills the limit was
+    almost certainly cut — and a cut that ends on a "~" is the
+    bug this fixes."""
+    if len(text) < limit:
+        # A joined slice can come in under the limit yet still
+        # end on a lone "~": _set_sample joins a 100-char slice
+        # on whitespace, which can shrink it below the limit
+        # while keeping a "~" whose code letter was cut off
+        # (the shipped samples do exactly this: 99 chars ending
+        # in " ~"). A complete encoding never ends on a lone
+        # marker — a literal "~" is written as "~~" — so a "~"
+        # that is its own last word is always a cut code, and
+        # it goes. "~~" itself is kept: it ends in "~~", not
+        # " ~", so the check below never matches a real escape.
+        if text == "~":
+            return ""
+        if text.endswith(" ~"):
+            return text[:-2]
+        return text
+    cut = text[:limit].rstrip("~")
+    boundary = max(cut.rfind(" "), cut.rfind("\n"))
+    if boundary > 0:
+        cut = cut[:boundary]
+    return cut + "…"
+
+
+def _whole_words(slice_text, full_text):
+    """Drop a trailing partial word from a cut slice.
+
+    V04-FIX (verify): _set_sample takes the first 100 characters
+    and the whitespace join kept a word the cut landed inside
+    ("fox wa"). A slice ends mid-word when the text runs on past
+    the cut with no space on either side of it; the last token
+    then goes. A slice that ends at a word boundary, or is the
+    whole text, is untouched — and a single token has nowhere
+    better to break, so it stays (same rule as _trim_sample).
+    No ellipsis here: the stored sample feeds the Try-it sample
+    button, and a "…" baked in would be pasted as text."""
+    joined = " ".join(slice_text.split())
+    if len(full_text) <= len(slice_text):
+        return joined
+    if not slice_text or slice_text[-1].isspace():
+        return joined
+    if full_text[len(slice_text)].isspace():
+        return joined
+    if " " not in joined:
+        return joined
+    return joined.rsplit(" ", 1)[0]
+
+
+class _GuardedTabWidget(QTabWidget):
+    """T03 (v0.4): a QTabWidget that warns the main window before
+    a programmatic page switch, so the scroll guard can arm in
+    time. A programmatic switch moves focus into the new page,
+    and the scroll area scrolls to show the focused widget —
+    synchronously, inside the switch, before currentChanged
+    fires, so no signal can arm a guard in time. Both
+    setCurrentIndex and setCurrentWidget are overridden:
+    setCurrentWidget does NOT route through setCurrentIndex
+    (measured in PySide6 6.12), so overriding one alone leaves
+    the other unguarded. A mouse click on a tab needs no guard
+    (focus lands on the scroll area itself and the value never
+    moves, measured) and does not go through these overrides:
+    the tab bar drives the stacked widget directly."""
+
+    def __init__(self, on_switch, parent=None):
+        super().__init__(parent)
+        self._on_switch = on_switch
+
+    def setCurrentIndex(self, index):
+        if index != self.currentIndex():
+            self._on_switch()
+        super().setCurrentIndex(index)
+
+    def setCurrentWidget(self, widget):
+        if widget is not self.currentWidget():
+            self._on_switch()
+        super().setCurrentWidget(widget)
 
 
 class MainWindow(QMainWindow):
@@ -870,11 +1154,25 @@ class MainWindow(QMainWindow):
         self._lower_words = None     # once per dictionary, not
         self._sample_before = ""     # once per keystroke.
         self._sample_after = ""
+        # T18 (v0.4): [(word, count)] that got no code.
+        self._uncovered_words = []
+        # T19 (v0.4): the folder the current dictionary was
+        # built from (None: imported, or none yet). Compared
+        # against the folder field for the stale hint.
+        self._dict_source_folder = None
+        self._rebuild_folder = None
         self._thread = None
         self._worker = None
         self._rebuild_done = True
         self._ever_rebuilt = False
-        self._tried_it = False
+        # T13 (v0.4): whether the user tried Try it survives a
+        # restart — the checklist stays until step 3 is done.
+        self._tried_it = self.settings.value(
+            "tried_it", False, type=bool)
+        # T03 (v0.4): the tab-switch scroll guard (see
+        # _GuardedTabWidget).
+        self._tab_switch_guard = False
+        self._tab_switch_scroll = 0
         self._howto_window = None
         self._tryit_window = None
         self._shortcuts_window = None
@@ -919,12 +1217,14 @@ class MainWindow(QMainWindow):
         self.settings.setValue("samples_added", True)
 
     def _refresh_checklist(self):
-        """Show the getting-started checklist only until the first
-        rebuild (T1, entry 020). Dismissed means dismissed."""
+        """Show the getting-started checklist until all three
+        steps are done (T1, entry 020; T13 v0.4: step 3 used to
+        vanish with the first rebuild, so the checklist never
+        showed it ticked). Dismissed means dismissed."""
         if self.settings.value("checklist_done", False, type=bool):
             self.checklist_frame.setVisible(False)
             return
-        if self.dictionary:
+        if self.dictionary and self._tried_it:
             self.checklist_frame.setVisible(False)
             return
         self.checklist_frame.setVisible(True)
@@ -933,9 +1233,11 @@ class MainWindow(QMainWindow):
         self._set_check_step(
             self.check_step1,
             "Put files in the Source Material folder", has_files)
+        # T13 (v0.4): a loaded dictionary counts as a rebuild —
+        # _ever_rebuilt is False after a restart.
         self._set_check_step(self.check_step2,
                              "Press Rebuild dictionary",
-                             self._ever_rebuilt)
+                             self._ever_rebuilt or bool(self.dictionary))
         self._set_check_step(
             self.check_step3,
             "Try it: encode some text in the Try it window",
@@ -966,6 +1268,11 @@ class MainWindow(QMainWindow):
 
         central = QWidget(self)
         layout = QVBoxLayout(central)
+        # T10 (v0.4): 6 px margins and 4 px gaps, not the 11/6
+        # defaults — the table needs every pixel of the viewport
+        # to show 8 rows at default size.
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
 
         folder_row = QHBoxLayout()
         folder_row.addWidget(QLabel("Source Material folder:"))
@@ -993,12 +1300,30 @@ class MainWindow(QMainWindow):
         self.folder_warning = QLabel("")
         self.folder_warning.setObjectName("warningLabel")
         folder_row.addWidget(self.folder_warning)
+        # T06 (v0.4): validate on every change of the field text,
+        # not only on focus loss — a drop, a Browse pick, or a
+        # restore updates the warning at once, so it can never go
+        # stale (F07). Connected here, after the warning label
+        # exists: the first setText above would otherwise call
+        # _validate_folder before there is a label to write to.
+        self.folder_edit.textChanged.connect(
+            self._validate_folder)
         layout.addLayout(folder_row)
 
         hint = QLabel("Your books and documents go here. %s reads "
                       "them to build the dictionary." % APP_NAME)
         hint.setWordWrap(True)
         layout.addWidget(hint)
+        # T19 (v0.4): the stale hint — shown only when the
+        # dictionary came from a different folder than the one
+        # in the field above.
+        self.stale_label = QLabel(
+            "Dictionary is from a different folder. Press "
+            "Rebuild to refresh it.")
+        self.stale_label.setObjectName("warningLabel")
+        self.stale_label.setWordWrap(True)
+        self.stale_label.setVisible(False)
+        layout.addWidget(self.stale_label)
 
         rebuild_row = QHBoxLayout()
         self.rebuild_button = QPushButton("Rebuild dictionary")
@@ -1018,14 +1343,22 @@ class MainWindow(QMainWindow):
         rebuild_row.addWidget(self.cancel_button)
         layout.addLayout(rebuild_row)
 
+        # T10 (v0.4) + T13 (v0.4): the progress row is hidden
+        # whenever no rebuild is running. The idle bar read as a
+        # stalled "0%" (F19), and its 43 px belong to the table
+        # (F15): at default size the table shows 8 rows with the
+        # row hidden and 4 without it (measured). _set_working
+        # shows the row when a rebuild starts.
         self.progress_label = QLabel(PROGRESS_IDLE)
         self.progress_label.setSizePolicy(QSizePolicy.Preferred,
                                           QSizePolicy.Fixed)
+        self.progress_label.setVisible(False)
         layout.addWidget(self.progress_label)
         self.progress_bar = QProgressBar()
         self.progress_bar.setMinimum(0)
         self.progress_bar.setMaximum(1)
         self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
 
         # Inline notice (T5): problems get a visible home that
@@ -1070,7 +1403,12 @@ class MainWindow(QMainWindow):
         dismiss_row.addWidget(self.checklist_dismiss)
         check_layout.addLayout(dismiss_row)
         self.checklist_frame.setVisible(False)
-        layout.addWidget(self.checklist_frame)
+        # T18 (v0.4): the checklist is NOT added to the main
+        # layout — it goes at the top of the scroll area, above
+        # the bento (see below). T13 keeps it visible until
+        # step 3 is done, and at 169 px tall it left the table
+        # 1 row tall when it sat above the scroll area; inside,
+        # it scrolls away with the content.
 
         # Results area (T3): bento, tabs, exports. Hidden until a
         # dictionary exists, so the first screen is three choices.
@@ -1083,19 +1421,48 @@ class MainWindow(QMainWindow):
         self.results_area.setHorizontalScrollBarPolicy(
             Qt.ScrollBarAlwaysOff)
         self.results_area.setFrameShape(QFrame.NoFrame)
+        # T03 (v0.4): the scroll guard. A programmatic tab switch
+        # moves focus into the new page, and the scroll area
+        # scrolls to show the focused widget — the jump happens
+        # synchronously inside the switch, before currentChanged
+        # fires, so the guard is armed by _GuardedTabWidget
+        # before the switch runs, and holds the scroll value at
+        # the moment it tries to move.
+        self._tab_guard_timer = QTimer(self)
+        self._tab_guard_timer.setSingleShot(True)
+        self._tab_guard_timer.timeout.connect(
+            self._clear_tab_switch_guard)
+        self.results_area.verticalScrollBar().valueChanged.connect(
+            self._on_results_scroll)
         results_inner = QWidget()
         results_layout = QVBoxLayout(results_inner)
         results_layout.setContentsMargins(0, 0, 0, 0)
-        results_layout.setSpacing(4)
-        results_layout.addWidget(self._build_bento())
+        # T10 (v0.4): 2 px gaps, not 4 — the table needs every
+        # pixel of the viewport to show 8 rows at default size.
+        results_layout.setSpacing(2)
+        # T18 (v0.4): the checklist is the scroll area's first
+        # item, above the bento — the first screen still shows
+        # folder, Rebuild and checklist, and after a rebuild the
+        # checklist scrolls off instead of eating fixed viewport.
+        results_layout.addWidget(self.checklist_frame)
+        self._bento_widget = self._build_bento()
+        results_layout.addWidget(self._bento_widget)
 
-        self.tabs = QTabWidget()
+        self.tabs = _GuardedTabWidget(self._arm_tab_switch_guard)
         self._dictionary_tab_widget = self._dictionary_tab()
         self.tabs.addTab(self._dictionary_tab_widget, "Dictionary")
         self._skipped_tab_widget = self._skipped_tab()
         self.tabs.addTab(self._skipped_tab_widget, "Skipped files")
         self._help_tab_widget = self._help_tab()
         self.tabs.addTab(self._help_tab_widget, "Help")
+        # T18 (v0.4): the uncovered-words tab goes AFTER Help,
+        # so the existing tab indices 0-2 are unchanged.
+        self._uncovered_tab_widget = self._uncovered_tab()
+        self.tabs.addTab(self._uncovered_tab_widget,
+                         "Words without codes")
+        # T03 (v0.4): the tab widget is a _GuardedTabWidget, so
+        # a programmatic switch arms the scroll guard first (U28:
+        # an ordinary click must not move the user's place).
         results_layout.addWidget(self.tabs, stretch=1)
 
         bottom_row = QHBoxLayout()
@@ -1125,16 +1492,29 @@ class MainWindow(QMainWindow):
         bottom_row.addWidget(self.debug_button)
         bottom_row.addStretch(1)
         results_layout.addLayout(bottom_row)
+        # V04-FIX (verify): a stretch at the bottom of the scroll
+        # area's content. On the first run the checklist is the
+        # only visible item here, and with no stretchable widget
+        # left (the tabs, stretch 1, are hidden) the layout
+        # centres it — 220 px of dead space above it, measured.
+        # The stretch absorbs the spare room only while the
+        # results are hidden; once they show, the tabs take it
+        # instead, so the table keeps its full height. The
+        # stretch is set by _set_results_visible, like the
+        # bottom spacer below.
+        self._results_layout = results_layout
+        self._results_spacer_index = results_layout.count()
+        results_layout.addStretch(0)
         self.results_area.setWidget(results_inner)
-        self.results_area.setVisible(False)
+        # T18 (v0.4): the scroll area is visible from the start
+        # — it holds the checklist on the first screen. What
+        # hides until a rebuild is the results inside it (bento,
+        # tabs, bottom-row buttons); see _set_results_visible.
         layout.addWidget(self.results_area, stretch=1)
-        # Bottom spacer: with the results area hidden (first run),
-        # a hidden widget's stretch is ignored and QBoxLayout
-        # spreads the spare space evenly between the visible
-        # widgets instead of pooling it at the bottom (proven by
-        # probe: ~45 px gaps everywhere). The spacer takes it
-        # instead; _set_results_visible switches its stretch off
-        # once the results area is shown.
+        # Bottom spacer: kept at stretch 0 (see
+        # _set_results_visible) — the scroll area, stretch 1,
+        # takes the spare space in both states now that it is
+        # always visible.
         self._central_layout = layout
         self._bottom_spacer_index = layout.count()
         layout.addStretch(1)
@@ -1164,6 +1544,12 @@ class MainWindow(QMainWindow):
         self.export_text_action = file_menu.addAction(
             "Export text file")
         self.export_text_action.triggered.connect(self._export_text)
+        # T17 (v0.4): importing is how you get a dictionary
+        # without a rebuild, so it is always enabled.
+        self.import_action = file_menu.addAction(
+            "Import dictionary")
+        self.import_action.triggered.connect(
+            self._import_dictionary)
         self.debug_report_action = file_menu.addAction(
             "Debug report")
         self.debug_report_action.triggered.connect(
@@ -1292,11 +1678,13 @@ class MainWindow(QMainWindow):
                 or self.source_dir
             os.makedirs(target, exist_ok=True)
             added = 0
+            renamed = []
             for path in files:
                 name = os.path.basename(path)
                 dest = os.path.join(target, name)
                 if os.path.abspath(path) == os.path.abspath(dest):
                     continue  # already in the folder
+                new_name = None
                 if os.path.exists(dest):
                     base, ext = os.path.splitext(name)
                     number = 2
@@ -1305,17 +1693,38 @@ class MainWindow(QMainWindow):
                             target,
                             "%s (%d)%s" % (base, number, ext))
                         number += 1
+                    new_name = os.path.basename(dest)
                 try:
                     shutil.copy2(path, dest)
                     added += 1
+                    # T14 (v0.4): only a copy that landed counts
+                    # as a rename — a failed copy used no name.
+                    if new_name is not None:
+                        renamed.append(new_name)
                 except OSError:
                     self.log.exception(
                         "could not copy dropped file %s", path)
             if added:
-                self.statusBar().showMessage(
-                    "Added %d file%s to the Source Material "
-                    "folder. Press Rebuild to use them."
-                    % (added, "" if added == 1 else "s"))
+                # T14 (v0.4): a renamed file is named in the
+                # message — the old "Added 1 file" never said
+                # the file landed under a different name (F22).
+                if len(renamed) == 1 and added == 1:
+                    message = (
+                        "Added 1 file as %s (that name was "
+                        "taken). Press Rebuild to use it."
+                        % renamed[0])
+                elif renamed:
+                    message = (
+                        "Added %d files (%d saved under a new "
+                        "name, e.g. %s). Press Rebuild to use "
+                        "them." % (added, len(renamed),
+                                   renamed[0]))
+                else:
+                    message = (
+                        "Added %d file%s to the Source Material "
+                        "folder. Press Rebuild to use them."
+                        % (added, "" if added == 1 else "s"))
+                self.statusBar().showMessage(message)
                 self.log.action("dropped %d file(s) into %s"
                                 % (added, target))
                 self._refresh_checklist()
@@ -1374,8 +1783,8 @@ class MainWindow(QMainWindow):
         self.hero_sub.setText(
             "Rebuild to see how much shorter your text gets.")
         self.hero_tile.setToolTip(
-            "Saved: how much shorter the sample became with this "
-            "dictionary")
+            "Saved: how much shorter a %s-char sample became "
+            "with this dictionary" % "{:,}".format(SAMPLE_CHARS))
         grid.addWidget(self.hero_tile, 0, 0, 1, 2)
 
         self.files_tile, self.files_value, self.files_label = \
@@ -1411,6 +1820,19 @@ class MainWindow(QMainWindow):
         self.codes_tile.setToolTip(
             "Codes made: how many words got a shorthand code in "
             "this dictionary")
+        # T18 (v0.4): the words-without-codes link, inside the
+        # Codes tile like the skipped link inside the Files
+        # tile. Hidden when every word has a code.
+        self.uncovered_link = QPushButton("0 words have no code")
+        self.uncovered_link.setObjectName("linkButton")
+        self.uncovered_link.setToolTip(
+            "Show the words that got no code, with the reason "
+            "for each one")
+        self.uncovered_link.clicked.connect(
+            self._show_uncovered_tab)
+        self.uncovered_link.setVisible(False)
+        self.codes_tile.layout().insertWidget(2,
+                                             self.uncovered_link)
         grid.addWidget(self.codes_tile, 1, 0, 1, 2)
 
         self.sample_tile = QFrame()
@@ -1418,7 +1840,7 @@ class MainWindow(QMainWindow):
         sample_layout = QVBoxLayout(self.sample_tile)
         sample_layout.setContentsMargins(16, 6, 16, 6)
         self.sample_caption = QLabel(
-            "Sample: the first 100 characters, before and after")
+            "Sample: the start of your text, before and after")
         self.sample_caption.setObjectName("tileCaption")
         self.sample_caption.setWordWrap(True)
         self.sample_label = QLabel("Rebuild to see a sample.")
@@ -1440,8 +1862,11 @@ class MainWindow(QMainWindow):
         # in the source (title, blank, body) otherwise shows as
         # a doubled space mid-sample. Stored whole; the label
         # shows a shorter slice under Big text (see below).
-        self._sample_before = " ".join(before[:100].split())
-        self._sample_after = " ".join(after[:100].split())
+        # V04-FIX (verify): the 100-char cut can land inside a
+        # word — _whole_words drops the fragment, so the tile
+        # never ends on half a word ("fox wa").
+        self._sample_before = _whole_words(before[:100], before)
+        self._sample_after = _whole_words(after[:100], after)
         self._update_sample_label()
 
     def _update_sample_label(self):
@@ -1451,17 +1876,19 @@ class MainWindow(QMainWindow):
         # bento's minimum at 14 pt already exceeds the window, so
         # the 4th line was clipped off (proven by probe). 60
         # characters is ~2 lines at 14 pt and still shows the
-        # before/after. The caption always says which it is.
+        # before/after. T08 (v0.4): both slices are cut at a word
+        # boundary (see _trim_sample), so the length varies — the
+        # caption no longer names a character count.
         if not self._sample_before:
             self.sample_label.setText("Rebuild to see a sample.")
             return
         chars = 60 if self._big_text else 100
         self.sample_caption.setText(
-            "Sample: the first %d characters, before and after"
-            % chars)
+            "Sample: the start of your text, before and after")
         self.sample_label.setText(
-            "'%s'  ->  '%s'" % (self._sample_before[:chars],
-                                self._sample_after[:chars]))
+            "'%s'  ->  '%s'" % (
+                _trim_sample(self._sample_before, chars),
+                _trim_sample(self._sample_after, chars)))
 
     def _refresh_sample_minimum(self):
         # Hard floor from the layout's own minimum, recomputed
@@ -1497,12 +1924,16 @@ class MainWindow(QMainWindow):
 
     def _apply_table_density(self):
         # T29: the row height follows the font, so Compact never
-        # clips the text under Big text.
+        # clips the text under Big text. T10 (v0.4): the padding
+        # dropped from +12/+4 to +6/+2 — the old Comfortable rows
+        # (32 px at 11 pt) left the table showing 4 rows at
+        # default size; 26 px rows show 8 (measured), and the
+        # text still has room to breathe.
         spacing = self.table.fontMetrics().lineSpacing()
         if self._compact_table:
-            height = spacing + 4
+            height = spacing + 2
         else:
-            height = spacing + 12
+            height = spacing + 6
         self.table.verticalHeader().setDefaultSectionSize(height)
 
     def _toggle_table_density(self):
@@ -1537,6 +1968,10 @@ class MainWindow(QMainWindow):
     def _dictionary_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
+        # T10 (v0.4): 2 px gaps, not the default 6 — the table
+        # needs every pixel of the viewport to show 8 rows at
+        # default size.
+        layout.setSpacing(2)
         search_row = QHBoxLayout()
         self.search_edit = QLineEdit()
         # T16: drops fall through to the window.
@@ -1564,24 +1999,54 @@ class MainWindow(QMainWindow):
             "Most frequent first: top %d codes" % TOP_SHOWN)
         search_row.addWidget(self.table_count_label)
         layout.addLayout(search_row)
-        # T14: one line under the search box, saying what it does.
-        self.search_hint = QLabel(
-            "Type part of a word to find its code.")
-        self.search_hint.setObjectName("tileCaption")
-        layout.addWidget(self.search_hint)
+        # T10 (v0.4): the T14 hint line under the search box is
+        # gone — it restated the placeholder ("Search the
+        # dictionary...") and the tooltip, and its 18 px are a
+        # row of the table. The field still explains itself
+        # (U20) through the placeholder and the tooltip.
         # T18: shown only when a search finds nothing.
+        # T15 (v0.4): a dead-end search says why it might have
+        # failed and what fixes it — not just "try shorter".
         self.search_empty_label = QLabel(
-            "No words match. Try a shorter word.")
+            "No words match. It may not be in your Source "
+            "Material. Try a shorter word, or rebuild with "
+            "files that use it.")
         self.search_empty_label.setObjectName("warningLabel")
         self.search_empty_label.setVisible(False)
         layout.addWidget(self.search_empty_label)
         self.table_model = DictionaryTableModel(self)
         self.table = QTableView()
         self.table.setModel(self.table_model)
-        self.table.setMinimumHeight(140)
+        # T10 (v0.4): the table takes the room the hidden
+        # progress row freed — 250 px shows 8 rows at the new
+        # 26 px row height, and the scroll area still takes the
+        # overflow under Big text.
+        self.table.setMinimumHeight(250)
         self.table.setEditTriggers(QTableView.NoEditTriggers)
         self.table.setSelectionBehavior(QTableView.SelectRows)
         self.table.setSelectionMode(QTableView.SingleSelection)
+        # T10 (v0.4): header-click sorting (most-frequent-first
+        # stays the default) and a right-click copy menu. The
+        # count label refreshes on layoutChanged, which the model
+        # emits after every sort — so the label always names the
+        # order the table is actually in. (The lambda swallows
+        # the signal's overload arguments.) The sort indicator
+        # is cleared BEFORE sorting is enabled: a fresh header
+        # points at column 0, and setSortingEnabled sorts by it
+        # at once (column 0, descending — measured), which would
+        # silently reorder the table before the user ever clicks
+        # a header.
+        self.table.horizontalHeader().setSortIndicator(
+            -1, Qt.AscendingOrder)
+        self.table.setSortingEnabled(True)
+        self.table_model.layoutChanged.connect(
+            lambda *args: self._refresh_count_label())
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(
+            self._show_table_menu)
+        self.table.setToolTip(
+            "Right-click a row to copy its word, code, or the "
+            "whole row. Ctrl+C copies the selected cell.")
         # NOTE: QTableView has no setUniformRowHeights (that is a
         # QTableWidget method); the view already asks the model
         # per row, which is the whole point of the virtual table.
@@ -1613,6 +2078,17 @@ class MainWindow(QMainWindow):
         layout.addWidget(help_view)
         return tab
 
+    def _uncovered_tab(self):
+        # T18 (v0.4): the words that got no code, most-used
+        # first, with the reason for each one.
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.addWidget(QLabel(
+            "Words in your files that got no code, and why:"))
+        self.uncovered_list = QListWidget()
+        layout.addWidget(self.uncovered_list)
+        return tab
+
     # -- state --------------------------------------------------------
     def _restore_state(self):
         geometry = self.settings.value("geometry")
@@ -1621,6 +2097,10 @@ class MainWindow(QMainWindow):
         folder = self.settings.value("source_folder")
         if folder:
             self.folder_edit.setText(folder)
+        # T06 (v0.4): a moved folder warns on startup, as the
+        # README promises — validate the restored path instead of
+        # waiting for the user to tab through the field (F07).
+        self._validate_folder()
         self.log.set_setting("source_folder",
                              self.folder_edit.text())
         tab = self.settings.value("active_tab", 0, type=int)
@@ -1665,6 +2145,11 @@ class MainWindow(QMainWindow):
     def _refresh_buttons(self):
         have_dict = bool(self.dictionary)
         self.tryit_button.setEnabled(have_dict)
+        # T11 (v0.4): the View menu's Try it is disabled without
+        # a dictionary too, like the button — opening the window
+        # before the first rebuild showed a dead window (F21).
+        # Disabling the action disables its Ctrl+E shortcut too.
+        self.tryit_action.setEnabled(have_dict)
         self.export_json_button.setEnabled(have_dict)
         self.export_text_button.setEnabled(have_dict)
         self.export_json_action.setEnabled(have_dict)
@@ -1677,10 +2162,15 @@ class MainWindow(QMainWindow):
             self._tryit_window.refresh_buttons()
 
     def _set_working(self, working):
-        """Activity light + buttons for the rebuilding state (U16)."""
+        """Activity light + buttons for the rebuilding state (U16).
+        T10/T13 (v0.4): the progress row shows only while a
+        rebuild runs; idle, it hides, so the table keeps its
+        43 px and the first screen shows no stalled "0%" bar."""
         self.rebuild_button.setEnabled(not working)
         self.cancel_button.setEnabled(working)
         self.progress_bar.setValue(0)
+        self.progress_label.setVisible(working)
+        self.progress_bar.setVisible(working)
         if working:
             self.activity_light.setStyleSheet(LIGHT_WORKING)
             self.activity_text.setText("Working...")
@@ -1690,11 +2180,32 @@ class MainWindow(QMainWindow):
             self.progress_label.setText(PROGRESS_IDLE)
 
     def _set_results_visible(self, visible):
-        self.results_area.setVisible(visible)
+        """Show or hide the results widgets — the bento, the
+        tabs and the bottom-row buttons. The scroll area itself
+        stays visible in both states: it holds the checklist
+        (T18 v0.4), which is the first screen's third choice
+        and must scroll away with the content instead of eating
+        fixed viewport above it. The bottom spacer stays at
+        stretch 0: the scroll area (stretch 1) takes the spare
+        space in both states."""
+        self._bento_widget.setVisible(visible)
+        self.tabs.setVisible(visible)
+        for button in (self.tryit_button, self.export_json_button,
+                       self.export_text_button, self.debug_button):
+            button.setVisible(visible)
         index = getattr(self, "_bottom_spacer_index", None)
         if index is not None:
-            self._central_layout.setStretch(
-                index, 0 if visible else 1)
+            self._central_layout.setStretch(index, 0)
+        # V04-FIX (verify): while the results are hidden, the
+        # checklist is the only visible item in the scroll area
+        # — the bottom stretch there takes the spare room so the
+        # checklist sits at the top instead of floating mid-window.
+        # Once the results show, the stretch goes back to 0 and
+        # the tabs (stretch 1) take the room, as before.
+        layout = getattr(self, "_results_layout", None)
+        index = getattr(self, "_results_spacer_index", None)
+        if layout is not None and index is not None:
+            layout.setStretch(index, 0 if visible else 1)
 
     # -- notice (T5) --------------------------------------------------
     def _show_notice(self, text):
@@ -1705,6 +2216,39 @@ class MainWindow(QMainWindow):
 
     def _hide_notice(self):
         self.notice_frame.setVisible(False)
+
+    def _arm_tab_switch_guard(self):
+        """T03: arm the scroll guard before a programmatic tab
+        switch (called by _GuardedTabWidget). The guard holds
+        the scroll value at the moment it tries to move, for
+        300 ms, then releases: a deliberate scroll position is
+        preserved, and a later scroll by the user is never
+        blocked."""
+        self._tab_switch_scroll = \
+            self.results_area.verticalScrollBar().value()
+        self._tab_switch_guard = True
+        self._tab_guard_timer.start(300)
+
+    def _disarm_tab_switch_guard(self):
+        """T03: release the scroll guard at once. _focus_search
+        uses this: it WANTS the scroll, because its job is to
+        bring the search box into view."""
+        self._tab_switch_guard = False
+        self._tab_guard_timer.stop()
+
+    def _on_results_scroll(self, value):
+        """T03: while the tab-switch guard is armed, refuse any
+        scroll move that is not the saved position. The setValue
+        inside re-enters this handler once with the saved value,
+        which passes the check and stops."""
+        if self._tab_switch_guard \
+                and value != self._tab_switch_scroll:
+            self.results_area.verticalScrollBar().setValue(
+                self._tab_switch_scroll)
+
+    def _clear_tab_switch_guard(self):
+        """T03: release the tab-switch scroll guard."""
+        self._tab_switch_guard = False
 
     # -- skipped surfacing (T9) ---------------------------------------
     def _update_skipped_badge(self, count):
@@ -1721,11 +2265,49 @@ class MainWindow(QMainWindow):
     def _show_skipped_tab(self):
         self.tabs.setCurrentWidget(self._skipped_tab_widget)
 
+    def _refresh_uncovered(self):
+        """T18 (v0.4): the Codes-tile link, the tab badge and
+        the list all follow self._uncovered_words."""
+        count = len(self._uncovered_words)
+        index = self.tabs.indexOf(self._uncovered_tab_widget)
+        if count > 0:
+            self.tabs.setTabText(
+                index, "Words without codes (%d)" % count)
+            if count == 1:
+                self.uncovered_link.setText("1 word has no code")
+            else:
+                self.uncovered_link.setText(
+                    "%d words have no code" % count)
+            self.uncovered_link.setVisible(True)
+        else:
+            self.tabs.setTabText(index, "Words without codes")
+            self.uncovered_link.setVisible(False)
+        self.uncovered_list.clear()
+        for word, _count in self._uncovered_words:
+            if len(word) < MIN_WORD_LEN:
+                reason = "too short to shrink"
+            else:
+                reason = ("the next code would not make it "
+                          "shorter")
+            self.uncovered_list.addItem("%s: %s" % (word, reason))
+
+    def _show_uncovered_tab(self):
+        self.tabs.setCurrentWidget(self._uncovered_tab_widget)
+
     # -- search (T4) + presets (T11) ----------------------------------
     def _focus_search(self):
-        if not self.results_area.isVisible():
+        # T18 (v0.4): the tabs are the "has results" signal now
+        # — the scroll area itself stays visible (it holds the
+        # checklist), so it can no longer tell a first run from
+        # a rebuild.
+        if not self.tabs.isVisible():
             return
         self.tabs.setCurrentWidget(self._dictionary_tab_widget)
+        # T03 (v0.4): the guarded switch armed the scroll guard;
+        # release it before focusing the search box, because
+        # this action WANTS the scroll — its job is to bring the
+        # search box into view.
+        self._disarm_tab_switch_guard()
         self.search_edit.setFocus()
         self.search_edit.selectAll()
 
@@ -1845,6 +2427,24 @@ class MainWindow(QMainWindow):
         else:
             self.folder_warning.setText(
                 "That folder does not exist.")
+        # T19 (v0.4): the folder field is also the stale hint's
+        # input — _validate_folder runs on every change of the
+        # field (textChanged), so the hint can never go stale.
+        self._refresh_stale_hint()
+
+    def _refresh_stale_hint(self):
+        """T19 (v0.4): show the gold hint under the folder line
+        when the dictionary came from a different folder than
+        the one in the field — the folder changed since the last
+        rebuild. An imported dictionary has no source folder,
+        so it never shows the hint."""
+        show = (bool(self.dictionary)
+                and self._dict_source_folder is not None
+                and os.path.normpath(
+                    self.folder_edit.text().strip()
+                    or self.source_dir)
+                != os.path.normpath(self._dict_source_folder))
+        self.stale_label.setVisible(show)
 
     def _browse_folder(self):
         folder = QFileDialog.getExistingDirectory(
@@ -1864,6 +2464,9 @@ class MainWindow(QMainWindow):
 
     # -- rebuild ------------------------------------------------------
     def rebuild(self):
+        # T06 (v0.4): refresh the warning before building, so it
+        # can never be stale at the moment it matters (F07).
+        self._validate_folder()
         folder = self.folder_edit.text().strip() or self.source_dir
         if not os.path.isdir(folder):
             self.statusBar().showMessage(
@@ -1880,6 +2483,10 @@ class MainWindow(QMainWindow):
         self.log.action("rebuild from %s" % folder)
         self.log.set_setting("source_folder", folder)
         self.settings.setValue("source_folder", folder)
+        # T19 (v0.4): remember which folder this rebuild read,
+        # so the finished handler can record the dictionary's
+        # source.
+        self._rebuild_folder = folder
         self._rebuild_done = False
         self._set_working(True)
         self.statusBar().showMessage("Rebuilding the dictionary...")
@@ -1920,12 +2527,17 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
 
     def _on_file_progress(self, name, fraction):
-        # T08: progress inside one big file, so the label moves
-        # while a long read runs.
+        # T08: progress inside one big file. T05 (v0.4): the label
+        # keeps the overall story ("Reading file 5 of 150") and
+        # the in-file percentage lives in the status bar only,
+        # while the file is still being read — a file that read
+        # in one chunk never flashes "100%" next to the overall
+        # bar (F05).
         if self._worker is None:
             return  # cleaned up already (window closing)
-        self.progress_label.setText(
-            "Reading %s: %.0f%%" % (name, fraction * 100))
+        if fraction < 1.0:
+            self.statusBar().showMessage(
+                "Reading %s: %.0f%%" % (name, fraction * 100))
 
     def _on_rebuild_finished(self, dictionary, report):
         if self._worker is None:
@@ -1939,24 +2551,34 @@ class MainWindow(QMainWindow):
                 "in place.")
             self.log.action("rebuild cancelled by the user")
             return
+        if report.codes_assigned == 0:
+            # T01 (v0.4): a rebuild that produced no dictionary
+            # must not replace the current one. The old behaviour
+            # saved the empty result over the good dictionary and
+            # rotated the good one out of the previous slot, so
+            # two empty rebuilds lost it for good (F01). Now the
+            # dictionary, the saved file and the previous file all
+            # stay exactly as they were, and the notice says so.
+            self._on_rebuild_no_result(report)
+            return
         self._set_dictionary(dictionary)
+        # T19 (v0.4): the dictionary's source is the folder
+        # this rebuild read — recorded before the save, so the
+        # build record carries it.
+        self._dict_source_folder = self._rebuild_folder
         self._show_report(report)
         saved = self._save_dictionary(report)
         self._refresh_buttons()
         self._set_results_visible(bool(self.dictionary))
-        if report.files_read == 0:
-            self._show_notice(
-                "No readable text found in that folder. Drop some "
-                "files into the folder and press Rebuild again.")
-            self.statusBar().showMessage(
-                "No readable text found. Drop some files into the "
-                "folder and press Rebuild again.")
-        elif not saved:
+        self._refresh_stale_hint()
+        if not saved:
             self.statusBar().showMessage(
                 "Rebuilt, but the dictionary could not be saved")
         else:
             self._ever_rebuilt = True
-            self.settings.setValue("checklist_done", True)
+            # T13 (v0.4): a rebuild no longer marks the
+            # checklist done — it stays until step 3 (Try it)
+            # is done too.
             self._refresh_checklist()
             self._finish_moment(report)
             # T28: the status bar confirms the dictionary was
@@ -1966,6 +2588,44 @@ class MainWindow(QMainWindow):
                 "Dictionary saved."
                 % (report.files_read, report.total_words,
                    report.codes_assigned))
+
+    def _on_rebuild_no_result(self, report):
+        """A finished rebuild that produced zero codes (T01/T02).
+
+        Nothing is replaced: the dictionary on screen, the saved
+        file and the previous file all stay as they were. The
+        skipped list still updates, so the Skipped tab explains a
+        folder full of unreadable files. The notice names the
+        real case: an empty folder, files none of which could be
+        read, or files read but no word long enough to shorten.
+        """
+        self._show_skipped_list(report.files_skipped)
+        if report.files_read == 0 and not report.files_skipped:
+            message = ("That folder is empty, so there was nothing "
+                       "to read. Drop some files into the folder "
+                       "and press Rebuild again.")
+            short = "That folder is empty."
+        elif report.files_read == 0:
+            count = len(report.files_skipped)
+            message = ("None of the files in that folder could be "
+                       "read (%d skipped). See the Skipped files "
+                       "tab for why. Drop some readable files "
+                       "into the folder and press Rebuild again."
+                       % count)
+            short = ("None of the files in that folder could be "
+                     "read.")
+        else:
+            message = ("Your files were read, but no word in them "
+                       "was long enough to shorten. Words need at "
+                       "least 3 letters to get a code.")
+            short = ("Your files were read, but no word was long "
+                     "enough to shorten.")
+        if self.dictionary:
+            message += " Your dictionary is unchanged."
+            short += " Your dictionary is unchanged."
+        self._show_notice(message)
+        self.statusBar().showMessage(short)
+        self.log.action("rebuild found nothing; dictionary unchanged")
 
     def _on_rebuild_failed(self, message):
         if self._worker is None:
@@ -1982,8 +2642,15 @@ class MainWindow(QMainWindow):
         if report.sample_text:
             self.hero_value.setText(
                 "%.0f%%" % report.sample_saved_pct)
+            # T04 (v0.4): the hero is measured on the
+            # SAMPLE_CHARS sample while the tile shows only its
+            # first 100 characters — label the basis, so the two
+            # numbers no longer look like they contradict each
+            # other (F04).
             self.hero_sub.setText(
-                "%d characters saved" % report.sample_saved)
+                "%d characters saved, on a %s-character sample"
+                % (report.sample_saved,
+                   "{:,}".format(SAMPLE_CHARS)))
         else:
             self.hero_value.setText("0%")
             self.hero_sub.setText("No text to sample yet.")
@@ -2000,12 +2667,23 @@ class MainWindow(QMainWindow):
             self._sample_after = ""
             self.sample_label.setText("No text to sample yet.")
         self._fill_table()
-        self.skipped_list.clear()
-        for name, reason in report.files_skipped:
-            self.skipped_list.addItem("%s: %s" % (name, reason))
-        self._update_skipped_badge(len(report.files_skipped))
+        self._show_skipped_list(report.files_skipped)
+        # T18 (v0.4): the words that got no code, from the
+        # report — a no-result rebuild never reaches here, so
+        # the list stays untouched on one (T01).
+        self._uncovered_words = list(report.uncovered_words)
+        self._refresh_uncovered()
         if self._tryit_window is not None:
             self._tryit_window.try_result.setText("")
+
+    def _show_skipped_list(self, files_skipped):
+        """Fill the Skipped tab and its badge from one rebuild's
+        skipped list. Shared by the report and the no-result path
+        (T02): a failed rebuild still explains itself there."""
+        self.skipped_list.clear()
+        for name, reason in files_skipped:
+            self.skipped_list.addItem("%s: %s" % (name, reason))
+        self._update_skipped_badge(len(files_skipped))
 
     def _set_dictionary(self, dictionary):
         """Swap in a new dictionary and drop the cached sort (T04):
@@ -2058,21 +2736,11 @@ class MainWindow(QMainWindow):
             entries = [entry for entry, lower in
                        zip(entries, self._lower_words)
                        if query in lower]
-            count = len(entries)
-            word = "match" if count == 1 else "matches"
-            self.table_count_label.setText(
-                "%d %s for '%s'" % (count, word, query))
-            self.search_empty_label.setVisible(count == 0)
-        elif self.show_all_button.isChecked():
-            self.table_count_label.setText(
-                "All %d codes, most frequent first" % len(entries))
-        elif len(entries) > TOP_SHOWN:
+            self.search_empty_label.setVisible(len(entries) == 0)
+        self._refresh_count_label(entries, query)
+        if not query and not self.show_all_button.isChecked() \
+                and len(entries) > TOP_SHOWN:
             entries = entries[:TOP_SHOWN]
-            self.table_count_label.setText(
-                "Most frequent first: top %d codes" % TOP_SHOWN)
-        else:
-            self.table_count_label.setText(
-                "Most frequent first: all %d codes" % len(entries))
         rows = [(word, code, self.dictionary.counts.get(word, 0))
                 for word, code in entries]
         self.table.setUpdatesEnabled(False)
@@ -2097,6 +2765,73 @@ class MainWindow(QMainWindow):
                 0, lambda: bar.setValue(
                     min(scroll, bar.maximum())))
 
+    def _refresh_count_label(self, entries=None, query=None):
+        """Set the count label from the table state (T10): the
+        label always names the order the table is actually in —
+        "Most frequent first" by default, "Sorted by Word" (or
+        Code, or Times used) once the user has clicked a header.
+        Called by _fill_table with the filtered entries, and by
+        the model's layoutChanged after a sort (when the entries
+        are recomputed from the current state)."""
+        if entries is None:
+            entries = self._table_entries()
+            if query is None:
+                query = self.search_edit.text().strip().lower()
+            if query:
+                entries = [entry for entry, lower in
+                           zip(entries, self._lower_words)
+                           if query in lower]
+        sort = self.table_model.sort_description()
+        if sort is not None:
+            order_cap = "Sorted by %s" % sort
+            order_low = "sorted by %s" % sort
+        else:
+            order_cap = "Most frequent first"
+            order_low = "most frequent first"
+        if query:
+            count = len(entries)
+            word = "match" if count == 1 else "matches"
+            if sort is not None:
+                text = "%s: %d %s for '%s'" % (
+                    order_cap, count, word, query)
+            else:
+                text = "%d %s for '%s'" % (count, word, query)
+        elif self.show_all_button.isChecked():
+            text = "All %d codes, %s" % (len(entries), order_low)
+        elif len(entries) > TOP_SHOWN:
+            text = "%s: top %d codes" % (order_cap, TOP_SHOWN)
+        else:
+            text = "%s: all %d codes" % (order_cap, len(entries))
+        self.table_count_label.setText(text)
+
+    def _table_menu_for(self, index):
+        """T10 (v0.4): the right-click menu for one table row.
+        Split from _show_table_menu so tests can build the menu
+        and trigger its actions without a modal loop."""
+        word, code, _count = self.table_model.entry_at(index.row())
+        menu = QMenu(self)
+        copy_word = menu.addAction("Copy word")
+        copy_word.triggered.connect(
+            lambda: QApplication.clipboard().setText(word))
+        copy_code = menu.addAction("Copy code")
+        copy_code.triggered.connect(
+            lambda: QApplication.clipboard().setText("~" + code))
+        copy_row = menu.addAction("Copy row")
+        copy_row.triggered.connect(
+            lambda: QApplication.clipboard().setText(
+                "%s: ~%s" % (word, code)))
+        return menu
+
+    def _show_table_menu(self, pos):
+        """T10 (v0.4): show the copy menu for the row under the
+        cursor (nothing happens on empty space)."""
+        index = self.table.indexAt(pos)
+        if not index.isValid():
+            return
+        self.table.setCurrentIndex(index)
+        self._table_menu_for(index).exec(
+            self.table.mapToGlobal(pos))
+
     # -- dictionary file ----------------------------------------------
     def _save_dictionary(self, report):
         data = self.dictionary.to_json_dict()
@@ -2114,6 +2849,18 @@ class MainWindow(QMainWindow):
                                    in report.files_skipped],
             "sample_before": report.sample_text,
             "sample_after": report.sample_encoded,
+            # T18 (v0.4): the words that got no code survive a
+            # restart, like the skipped list and the sample.
+            # The overhead is ~1-2% of the save file even on a
+            # huge corpus: uncovered words are bounded by the
+            # short words plus the long tail whose code would be
+            # too long.
+            "uncovered_words": [[word, count] for word, count
+                                in report.uncovered_words],
+            # T19 (v0.4): the folder this dictionary was built
+            # from (null when imported — an imported dictionary
+            # has no source folder).
+            "source_folder": self._dict_source_folder,
         }
         # T11: keep the old dictionary as the previous one, so a
         # rebuild gone wrong can be undone from the File menu.
@@ -2153,6 +2900,16 @@ class MainWindow(QMainWindow):
                 "The previous dictionary was damaged, so it could "
                 "not be restored.")
             return
+        if len(dictionary) == 0:
+            # T01 (v0.4): an empty previous file is not a restore.
+            # The old code claimed success while restoring nothing
+            # (F02); say so instead, and leave everything alone.
+            self._show_notice(
+                "The previous dictionary was empty, so there was "
+                "nothing to restore.")
+            self.statusBar().showMessage(
+                "The previous dictionary was empty.")
+            return
         try:
             atomic_write_text(
                 self.dict_path,
@@ -2166,7 +2923,19 @@ class MainWindow(QMainWindow):
                 "Check the folder is writable and try again.")
             return
         self._set_dictionary(dictionary)
-        self._show_loaded_build(data.get("build"))
+        # T19 (v0.4): Restore uses the restored build record's
+        # source when it has one; an older record without the
+        # key leaves the current source alone (the startup-load
+        # fallback to the folder field would be wrong here —
+        # the restored dictionary did not come from it).
+        build = data.get("build")
+        keep_source = (not isinstance(build, dict)
+                       or "source_folder" not in build)
+        previous_source = self._dict_source_folder
+        self._show_loaded_build(build)
+        if keep_source:
+            self._dict_source_folder = previous_source
+            self._refresh_stale_hint()
         self._refresh_buttons()
         self._set_results_visible(bool(self.dictionary))
         self.statusBar().showMessage(
@@ -2189,9 +2958,17 @@ class MainWindow(QMainWindow):
             # window always opens and says what happened.
             self.log.exception("saved dictionary would not load")
             self._set_dictionary(QwkhndDictionary())
-            self._show_notice(
-                "The saved dictionary was damaged, so Qwkhnd "
-                "started empty. Press Rebuild to make a new one.")
+            # T02: name Restore, the faster recovery, when a
+            # previous dictionary exists (F23, as the README
+            # already promises).
+            message = ("The saved dictionary was damaged, so "
+                       "Qwkhnd started empty. Press Rebuild to "
+                       "make a new one.")
+            if os.path.exists(self.previous_dict_path):
+                message += (" Or use File \u2192 Restore previous "
+                            "dictionary to bring back the one from "
+                            "before the last rebuild.")
+            self._show_notice(message)
             return
         self._show_loaded_build(data.get("build"))
         self.hero_sub.setText(
@@ -2208,7 +2985,9 @@ class MainWindow(QMainWindow):
             "%.0f%%" % build.get("sample_saved_pct", 0.0))
         if build.get("sample_saved"):
             self.hero_sub.setText(
-                "%d characters saved" % build["sample_saved"])
+                "%d characters saved, on a %s-character sample"
+                % (build["sample_saved"],
+                   "{:,}".format(SAMPLE_CHARS)))
         self.files_value.setText("%d" % build.get("files_read", 0))
         self.words_value.setText(
             "%d" % build.get("total_words", 0))
@@ -2227,6 +3006,34 @@ class MainWindow(QMainWindow):
         else:
             self._update_sample_label()
         self._fill_table()
+        # T19 (v0.4): restore the dictionary's source folder. A
+        # present key with a null value means imported (no
+        # source, never stale). An older save has no key at all:
+        # assume the current folder — no stale hint on load, the
+        # folder field is the best guess for where the
+        # dictionary came from.
+        if "source_folder" in build:
+            source = build["source_folder"]
+            self._dict_source_folder = (source if isinstance(
+                source, str) else None)
+        else:
+            self._dict_source_folder = (
+                self.folder_edit.text().strip() or self.source_dir)
+        self._refresh_stale_hint()
+        # T18 (v0.4): restore the words that got no code. An
+        # older save has no such key: the list is empty, and the
+        # tab honestly shows nothing until the next rebuild.
+        uncovered = build.get("uncovered_words")
+        if isinstance(uncovered, list):
+            self._uncovered_words = [
+                (entry[0], entry[1]) for entry in uncovered
+                if isinstance(entry, (list, tuple))
+                and len(entry) == 2
+                and isinstance(entry[0], str)
+                and isinstance(entry[1], int)]
+        else:
+            self._uncovered_words = []
+        self._refresh_uncovered()
         skipped = build.get("files_skipped_list")
         if isinstance(skipped, list):
             self.skipped_list.clear()
@@ -2259,7 +3066,8 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "Could not write that file")
             return
-        self.statusBar().showMessage("Dictionary exported to %s" % path)
+        self._show_saved("Dictionary exported to",
+                         "Last JSON export", path)
         self.log.action("dictionary exported as JSON to %s" % path)
 
     def _export_text(self):
@@ -2279,8 +3087,94 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "Could not write that file")
             return
-        self.statusBar().showMessage("Dictionary exported to %s" % path)
+        self._show_saved("Dictionary exported to",
+                         "Last text export", path)
         self.log.action("dictionary exported as text to %s" % path)
+
+    def _import_dictionary(self):
+        """T17 (v0.4): bring in a dictionary exported from
+        another Qwkhnd (or another machine). The file is
+        validated before anything is touched — a bad file leaves
+        the current dictionary, the saved file and the previous
+        file exactly as they were (the T01 no-wipe rule)."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import a dictionary",
+            self.data_dir, "JSON files (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            dictionary = QwkhndDictionary.from_json_dict(data)
+        except OSError:
+            self.log.exception("dictionary import failed")
+            self._show_notice(
+                "Could not read that file. Check it exists and "
+                "try again.")
+            return
+        except json.JSONDecodeError:
+            self.log.exception("dictionary import failed")
+            self._show_notice(
+                "That file is not a Qwkhnd dictionary. It does "
+                "not look like JSON.")
+            return
+        except (ValueError, TypeError, KeyError,
+                AttributeError) as exc:
+            self.log.exception("dictionary import failed")
+            self._show_notice(
+                "Could not import that file: %s." % exc)
+            return
+        if len(dictionary) == 0:
+            self._show_notice(
+                "That file holds no codes, so there was nothing "
+                "to import.")
+            return
+        self._set_dictionary(dictionary)
+        # A synthetic build record: the import has no source
+        # files, so the bento shows what the dictionary itself
+        # knows — its word counts and its size. The sample is
+        # cleared: the old dictionary's sample is not this
+        # dictionary's. T19 (v0.4): an imported dictionary has
+        # no source folder, so it never shows the stale hint.
+        self._dict_source_folder = None
+        self._sample_before = ""
+        self._sample_after = ""
+        report = BuildReport()
+        report.files_read = 0
+        report.total_words = sum(dictionary.counts.values())
+        report.unique_words = len(dictionary)
+        report.codes_assigned = len(dictionary)
+        if not self._save_dictionary(report):
+            self._show_notice(
+                "The dictionary was imported, but it could not "
+                "be saved. Check the data folder is writable.")
+        self._show_loaded_build({
+            "files_read": 0,
+            "total_words": report.total_words,
+            "unique_words": report.unique_words,
+            "sample_saved": 0,
+            "sample_saved_pct": 0.0,
+            # An empty skipped list, not a missing one: without
+            # this key _show_loaded_build leaves the old
+            # dictionary's skipped entries on screen.
+            "files_skipped_list": [],
+            # T19 (v0.4): a present null source, not a missing
+            # key — a missing key would fall back to the folder
+            # field, and an imported dictionary has no source.
+            "source_folder": None,
+        })
+        # An imported dictionary has no measured sample, so the
+        # hero shows a dash, not a 0% that was never measured.
+        self.hero_value.setText("-")
+        self.hero_sub.setText(
+            "Imported dictionary. No sample yet.")
+        self._set_results_visible(True)
+        self._refresh_buttons()
+        self._refresh_checklist()
+        self.statusBar().showMessage(
+            "Dictionary imported: %d codes from %s"
+            % (len(dictionary), os.path.basename(path)))
+        self.log.action("dictionary imported from %s" % path)
 
     def _debug_report(self):
         # T28: a failed report shows a notice instead of crashing
@@ -2295,8 +3189,19 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 "Could not write the debug report")
             return
+        self._show_saved("Debug report saved:",
+                         "Last debug report", path)
+
+    def _show_saved(self, message, history_label, path):
+        """T12 (v0.4): the status bar names the file, not the
+        whole path — a long path overflows the bar and reads as
+        gibberish (F18). The full path is the status bar's
+        tooltip, labeled as history, so it is never wrong when
+        shown later."""
         self.statusBar().showMessage(
-            "Debug report saved: %s" % path)
+            "%s %s" % (message, os.path.basename(path)))
+        self.statusBar().setToolTip(
+            "%s: %s" % (history_label, path))
 
 
 def main(argv=None):

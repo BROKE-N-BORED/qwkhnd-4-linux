@@ -81,7 +81,7 @@ class SingleSourceTests(unittest.TestCase):
         from qwkhnd import APP_ID, APP_NAME, VERSION
         self.assertEqual(APP_NAME, "Qwkhnd")
         self.assertEqual(APP_ID, "qwkhnd")
-        self.assertEqual(VERSION, "0.3")
+        self.assertEqual(VERSION, "0.4")
 
     def test_help_text_uses_the_single_source(self):
         from qwkhnd import APP_NAME, VERSION

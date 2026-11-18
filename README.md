@@ -33,28 +33,40 @@ Terminal path, if you ever want it: `bash install.sh`, then
    and builds a new dictionary from scratch. The rebuild runs in
    the background, so the window stays usable: progress shows
    under the button, and **Cancel** stops it (the old dictionary
-   stays in place until a rebuild finishes).
+   stays in place until a rebuild finishes). A rebuild that finds
+   nothing to build from leaves the dictionary, the saved file
+   and the previous file exactly as they were, and says so.
 3. The words that save the most text get the shortest codes. Try it
-   in the **Try it** window (the Try it button, or View menu), and
-   export the dictionary as JSON or plain text. The **Help** menu
-   opens a How to Use window, and the **Help** tab is a quick start.
+   in the **Try it** window (the Try it button, or View menu):
+   type or paste text to encode, or shorthand to decode. The
+   Try it window also encodes and decodes whole files, saving
+   the result next to the file you pick. Export the dictionary
+   as JSON or plain text. The **Help** menu opens a How to Use
+   window, and the **Help** tab is a quick start.
 
 On the first run, Qwkhnd drops three sample files into the Source
-Material folder and shows a short Getting started checklist, so
-Rebuild has something to read right away. The results appear as a
-bento grid (characters saved, files read, words found, codes
-assigned, before/after sample); the dictionary table has a live
-search box and a Show all switch. The **View** menu holds two
+Material folder and shows a short Getting started checklist, which
+stays until you have tried Try it, so Rebuild has something to
+read right away. The results appear as a bento grid (characters
+saved, files read, words found, codes assigned, before/after
+sample); the dictionary table has a live search box and a Show
+all switch. Click a column header to sort the table; right-click
+a row to copy its word, code or the whole row. Words that got no
+code are listed on the **Words without codes** tab (linked from
+the Codes tile), with the reason for each one. A gold hint under
+the folder line says when the dictionary came from a different
+folder than the one shown. The **View** menu holds two
 presets — **Big text** and **Reduced motion** — and the shortcuts
 are **Ctrl+R** rebuild, **Ctrl+E** Try it / encode, **/** search.
 
-The **File** menu holds Open folder, the exports, the Debug
-report, **Restore previous dictionary** (brings back the
-dictionary from before the last rebuild), and Quit. You can also
-drag files onto the window to copy them into the Source Material
-folder, or drag a folder onto it to make it the source folder.
-Every control explains itself when you hover over it, and the
-**Help** menu lists all the keyboard shortcuts.
+The **File** menu holds Open folder, the exports, **Import
+dictionary** (brings in a dictionary exported from another
+Qwkhnd), the Debug report, **Restore previous dictionary**
+(brings back the dictionary from before the last rebuild), and
+Quit. You can also drag files onto the window to copy them into
+the Source Material folder, or drag a folder onto it to make it
+the source folder. Every control explains itself when you hover
+over it, and the **Help** menu lists all the keyboard shortcuts.
 
 ## What it reads
 
@@ -88,8 +100,8 @@ Every control explains itself when you hover over it, and the
   codes, then 3-letter. A word gets no code when its code could not
   make it shorter.
 - A word is replaced by `~` + its code — but only when the coded
-  form is actually shorter, so encoding never makes text longer.
-  A literal `~` in your text is written as `~~`.
+  form is actually shorter, so encoding never makes text longer,
+  except for a literal `~` in your text, which is written as `~~`.
 - Decode is exact: decoding encoded text gives back the original,
   character for character. The test suite hammers on this.
 - When decoding, a code is the `~` sign plus all the letters
@@ -130,10 +142,14 @@ a scrubbed report you can send when something goes wrong.
   rebuild, cancel, single instance, plus the UI: checklist,
   samples, disclosure, search, bento, notices, state, presets,
   shortcuts, copy, and the v0.3 additions: EPUB, drag and drop,
-  restore, tooltips, menus, perf guards).
+  restore, tooltips, menus, perf guards; and the v0.4
+  additions: no-wipe rebuilds, table sorting and copy, file
+  encode/decode, import, uncovered words, stale hint).
 - Build the release zip: `python3 build_zip.py`
 - The debug log layer is the BNB T21 `debug_log.py` module
-  (standard library only), dropped in unchanged.
+  (standard library only), with one small v0.4 change: the
+  debug report omits its Services section when no service is
+  registered.
 - The name and version live only in `qwkhnd/__init__.py`
   (`APP_NAME` / `APP_ID` / `VERSION`); the file names, desktop
   files and installer strings carry the name too.

@@ -313,7 +313,7 @@ class QwkhndDictionary:
                 "saved dictionary uses a different marker")
         version = data.get("version")
         if version is not None \
-                and version not in ("0.1", "0.2", VERSION):
+                and version not in ("0.1", "0.2", "0.3", VERSION):
             raise ValueError(
                 "saved dictionary is version %s, which this "
                 "version cannot read" % version)
@@ -366,6 +366,12 @@ class QwkhndDictionary:
             % (APP_NAME, VERSION, len(self)),
             "Most frequent words first. A code is used as ~"
             "<code>, e.g. ~a.",
+            # T21 (v0.4): the list is ordered by frequency, but
+            # the codes were handed out by what they save — say
+            # so, or the first line misleads (F14).
+            "Codes are ranked by the text they save, so the "
+            "shortest code is not always on the most frequent "
+            "word.",
             "",
         ]
         for word, code in self._sorted_entries():
@@ -393,6 +399,9 @@ class BuildReport:
         self.sample_after = 0
         self.sample_saved = 0
         self.sample_saved_pct = 0.0
+        # T18 (v0.4): [(word, count)] that got no code,
+        # most-used first.
+        self.uncovered_words = []
 
 
 def build_from_folder(folder, log=None, progress=None,
@@ -427,9 +436,24 @@ def build_from_folder(folder, log=None, progress=None,
         name = _extract.display_name(folder, path)
         if progress is not None:
             progress(done, total, name)
+        # T09 (v0.4): an empty file is listed as skipped, not
+        # counted as read — the old code read it as "" and
+        # counted it, so the file count lied. (The reason uses
+        # a comma, not an em-dash: U33.) A getsize failure falls
+        # through to extract, which reports it in plain words.
+        try:
+            is_empty = os.path.getsize(path) == 0
+        except OSError:
+            is_empty = False
+        if is_empty:
+            report.files_skipped.append(
+                (name, "empty file, nothing to read"))
+            if log is not None:
+                log.info("skipped %s: empty file", name)
+            continue
         try:
             ok, payload = _extract.extract_file(
-                path, cancelled=cancelled,
+                path, cancelled=cancelled, log=log,
                 file_progress=(
                     (lambda frac, _name=name:
                      file_progress(_name, frac))
@@ -457,6 +481,12 @@ def build_from_folder(folder, log=None, progress=None,
     report.unique_words = len(counter)
     dictionary = QwkhndDictionary(build_word_codes(counter), counter)
     report.codes_assigned = len(dictionary)
+    # T18 (v0.4): the words that got no code — most-used first,
+    # so the window can show what a rebuild could not shrink.
+    report.uncovered_words = sorted(
+        ((word, count) for word, count in counter.items()
+         if word not in dictionary.word_to_code),
+        key=lambda wc: (-wc[1], wc[0]))
     report.sample_text = "".join(sample_parts)
     if report.sample_text:
         (report.sample_before, report.sample_after,
